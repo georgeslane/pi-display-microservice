@@ -1,0 +1,18 @@
+# systemd unit for pi-display-microservice. scripts/install.sh fills in the @PLACEHOLDERS@ and
+# installs it to /etc/systemd/system/pi-display-microservice.service.
+
+[Unit]
+Description=pi-display-microservice (Athena's status board on a Display HAT Mini)
+After=local-fs.target network.target
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@REPO_DIR@
+Environment=PYTHONUNBUFFERED=1
+ExecStart=@REPO_DIR@/.venv/bin/pi-display-microservice run
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,15 @@
+# pi-display-microservice settings. Copy to config.toml (install.sh does this) and edit.
+# Every setting is optional: the defaults work with Athena's own defaults.
+
+# Athena's status API: the host and port in the [display] section of Athena's config.toml.
+athena_url = "http://127.0.0.1:8091"
+
+# Only if Athena's [display] section has a token, then the same one here.
+token = ""
+
+# The LED: blue while Athena works, flashing amber when it needs you. false keeps it off.
+led = true
+
+# The name and timezone on the board. Empty means whatever Athena says.
+name = ""
+timezone = ""
