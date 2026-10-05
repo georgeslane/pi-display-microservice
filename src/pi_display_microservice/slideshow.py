@@ -178,13 +178,18 @@ def _notice(title: str, text: str, color: Color, footer: str) -> Image.Image:
 
 
 def _clean(text: str, font: ImageFont.FreeTypeFont) -> str:
-    """``text`` without the characters ``font`` can't draw (emoji, mostly), rather than with boxes for them."""
-    missing = _bitmap("￿", font)  # a noncharacter, so it comes out as the "missing" glyph
+    """``text`` without the characters ``font`` can't draw (emoji, mostly), rather than with boxes for them.
+
+    Characters that draw as nothing go too, such as the selector after an emoji that asks for it in colour.
+    Depending on its text engine, Pillow draws that as nothing or as a box, and kept, it would leave a gap.
+    """
+    # The "missing" glyph (a noncharacter comes out as it), and nothing at all.
+    unusable = {_bitmap("￿", font), _bitmap(" ", font)}
     kept = []
     for ch in text:
         if ch.isspace():
             kept.append(" ")
-        elif unicodedata.category(ch)[0] != "C" and _bitmap(ch, font) != missing:
+        elif unicodedata.category(ch)[0] != "C" and _bitmap(ch, font) not in unusable:
             kept.append(ch)
     return " ".join("".join(kept).split())
 
