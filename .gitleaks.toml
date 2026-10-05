@@ -11,3 +11,11 @@ id = "telegram-bot-token-anywhere"
 description = "Telegram bot token"
 regex = '''(?:^|[^0-9A-Za-z_-])([0-9]{8,12}:[A-Za-z0-9_-]{35})(?:[^0-9A-Za-z_-]|$)'''
 secretGroup = 1
+
+[[rules]]
+id = "google-photos-share-link"
+# Anyone with a shared album's link can see the album, so the link belongs in config.toml,
+# which git ignores, like Athena's token.
+description = "Google Photos album share link"
+regex = '''https://(?:photos\.app\.goo\.gl/[A-Za-z0-9]{6,}|photos\.google\.com/share/[A-Za-z0-9_-]{10,}\?key=[A-Za-z0-9_-]{6,})'''
+keywords = ["photos.app.goo.gl", "photos.google.com/share"]
