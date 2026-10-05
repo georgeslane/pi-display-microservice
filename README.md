@@ -2,7 +2,7 @@
 
 # pi-display-microservice
 
-Athena's status board: what [Athena](https://github.com/georgeslane/athena) is doing, on a [Pimoroni Display HAT Mini](https://pinout.xyz/pinout/display_hat_mini) on a Raspberry Pi.
+Athena's status board: what [Athena](https://github.com/georgeslane/athena) is doing, on a [Pimoroni Display HAT Mini](https://pinout.xyz/pinout/display_hat_mini) on a Raspberry Pi. In between, it can show a slideshow of your photos.
 
 ![The board while idle, thinking, using a tool, waiting for approval, after a failed request, and offline](docs/board.png)
 
@@ -11,7 +11,22 @@ Athena's status board: what [Athena](https://github.com/georgeslane/athena) is d
 - **Needs you:** a tool is waiting for your approval in Telegram. The shield pulses amber, the LED flashes amber, and the clock counts down to when the request is denied automatically.
 - **Offline:** Athena isn't answering. If that's for a reason other than Athena not running, such as a wrong token, the board says what it is.
 
-Press any button to turn the screen off. It comes back on by itself whenever Athena is working or needs you.
+![The photo page: a photo just liked, a photo just disliked, and the page while it gets the album](docs/photos.png)
+
+The photo page shows the photos in a Google Photos album, a new one every 5 minutes. The ones you like come up more often, and the ones you dislike less often. See [The photo slideshow](#the-photo-slideshow).
+
+## The buttons
+
+The board has two pages: the photos, if you've given it an album, and Athena's status. It starts on the photos.
+
+| Button | What it does |
+|---|---|
+| A, top left | Turns the screen off, and on again |
+| B, bottom left | Moves to the next page: from the photos to Athena's status, and back |
+| X, top right | On the photos: likes the photo on screen, so it comes up more often |
+| Y, bottom right | On the photos: dislikes the photo on screen, so it comes up less often |
+
+While the screen is off, any button turns it back on. It also comes on by itself whenever Athena is working or needs you, showing Athena's status, and goes off again when Athena is done. A tool waiting for your approval takes over from the photos too, until it's answered, so you never miss one. The LED shows what Athena is doing, whichever page is on screen.
 
 ## How it works
 
@@ -24,23 +39,30 @@ Athena and the board are separate programs. Athena publishes what it's doing thr
 │              │         │ ◄────────────── │      │      own, and keeps the latest status  │
 │              ▼         │                 │      ▼                                        │
 │ status API on :8091 ───┼───── JSON ────► │ app.py      the main loop, several times a    │
-└────────────────────────┘                 │      │      second: draws the latest status   │
-                                           │      ├─► board.py   the picture (320x240)     │
-                                           │      └─► screen.py  the LCD, LED and buttons, │
-                                           │                     or a PNG file            │
+└────────────────────────┘                 │      │      second: draws the page on screen  │
+                                           │      ├─► board.py      Athena's status page   │
+ Google Photos                             │      ├─► slideshow.py  the photo page         │
+┌────────────────────────┐                 │      │       ▲                                │
+│ your shared album ─────┼──── photos ───► │      │   album.py      copies the album, on a │
+└────────────────────────┘                 │      │                 thread of its own      │
+                                           │      └─► screen.py     the LCD, LED and       │
+                                           │                        buttons, or a PNG file │
                                            └───────────────────────────────────────────────┘
 ```
 
 **Polling, without the waiting.** Each request tells Athena which version of its status the board already has, and Athena holds its answer until something changes, or 25 seconds pass. So a change reaches the screen at once, while the board asks only about twice a minute when nothing happens. If Athena doesn't answer, the board shows it as offline and tries again every 5 seconds.
 
-**Drawing never waits for the network.** The client keeps the latest status on its own thread. The main loop draws it six times a second while something on screen moves (the spinner, the countdown) and once a second otherwise. It only sends a frame to the screen if it has changed.
+**Drawing never waits for the network.** The client keeps the latest status on its own thread, and the album keeps a copy of its photos on disk, on another. The main loop draws the page on screen six times a second while something on it moves (the spinner, the countdown) and once a second otherwise. It only sends a frame to the screen if it has changed.
 
 | File | What it does |
 |---|---|
 | `src/pi_display_microservice/status.py` | What a status is (`Snapshot`, `Status`), and reading Athena's JSON |
 | `src/pi_display_microservice/client.py` | Asking Athena for its status, and noticing when it's offline |
-| `src/pi_display_microservice/app.py` | The main loop: what to draw, how often, the LED and the buttons; the demo |
-| `src/pi_display_microservice/board.py` | Drawing the board. Pure Pillow, so it runs on any computer |
+| `src/pi_display_microservice/app.py` | The main loop: which page, what to draw, how often, the LED and the buttons; the demo |
+| `src/pi_display_microservice/board.py` | Drawing Athena's status. Pure Pillow, so it runs on any computer |
+| `src/pi_display_microservice/album.py` | Reading a shared Google Photos album, and keeping a copy of its photos |
+| `src/pi_display_microservice/slideshow.py` | The photo page: which photo comes next, and drawing it |
+| `src/pi_display_microservice/scores.py` | Likes and dislikes, and how they weight which photo comes next |
 | `src/pi_display_microservice/screen.py` | The Display HAT Mini (screen, LED, buttons), and the PNG preview |
 | `src/pi_display_microservice/config.py`, `cli.py` | Settings, and the `pi-display-microservice` command |
 | `scripts/install.sh`, `update.sh` | Setting it up on the Pi, and updating it |
@@ -73,6 +95,8 @@ Then check the board can hear Athena:
 uv run pi-display-microservice check
 ```
 
+To show your photos too, see [The photo slideshow](#the-photo-slideshow).
+
 ### Moving from the board built into pi-assistant
 
 The board used to be part of pi-assistant, as the `pi-assistant-display` service. This installer stops and removes that service, and so does pi-assistant's `scripts/update.sh`. Then, in Athena's `config.toml`, remove `led` from `[display]` and set it here instead. Athena's `doctor` reminds you.
@@ -89,8 +113,40 @@ The board used to be part of pi-assistant, as the `pi-assistant-display` service
 | `name`, `timezone` | `""` | The name on the board and the clock's timezone. Empty means whatever Athena says |
 | `wait_seconds` | `25` | How long each request lets Athena wait for a change (at most 30) |
 | `retry_seconds` | `5` | How soon to try again when Athena doesn't answer |
+| `album_url` | `""` | A Google Photos album's share link, for the photo page. Empty means no photo page |
 
 After changing it: `sudo systemctl restart pi-display-microservice`.
+
+## The photo slideshow
+
+**Setting it up.** In Google Photos, open the album, choose **Share**, then **Create link**, and copy the link. It starts `https://photos.app.goo.gl/`. Put it in `config.toml`:
+
+```toml
+album_url = "https://photos.app.goo.gl/…"
+```
+
+Then restart the board (`sudo systemctl restart pi-display-microservice`), and check it can read the album:
+
+```bash
+uv run pi-display-microservice check
+```
+
+Anyone with the link can see the album, so keep it in `config.toml`, which git ignores. The secret check stops a share link reaching GitHub from anywhere else.
+
+**Which photo comes next.** Every 5 minutes the board picks a new photo at random, but not evenly. Each photo has a score, x: the number of times you've liked it, minus the number of times you've disliked it. It comes up in proportion to its weight:
+
+| Score | Weight | |
+|---|---|---|
+| x ≥ 0 | 2 − 1/(1 + x) | 1 to start with, then 1.5 after a like, 1.75 after three, rising towards 2 |
+| x < 0 | 1/(1 + \|x\|) | 0.5 after a dislike, 0.25 after three, falling towards 0 |
+
+So a photo you like comes up at most twice as often as one you haven't rated, and one you dislike comes up less and less, but never disappears altogether. Every press counts, so press X three times for a photo you love. Liking or disliking doesn't change the photo on screen, and the next one is always a different photo.
+
+**What's kept where.** The photos are downloaded at the screen's size into `~/.local/share/pi-display-microservice/photos/`, so the slideshow carries on without the internet. Every hour, the board downloads photos added to the album, and deletes those taken out of it. Your likes and dislikes are in `~/.local/share/pi-display-microservice/scores.json`, and survive restarts and updates.
+
+**How the board reads the album.** Since March 2025, Google's Photos API can only read photos an app uploaded itself, so it can't read your albums. Instead, the board reads the album's share page, as a browser does. That page isn't an official API, so Google may change it. If it does, the photo page says it can't read the album and keeps showing the photos it already has, and `album.py` needs updating. Two limits:
+- The page for a very large album only lists its first batch of photos, so the slideshow only has those. `check` says when that's the case.
+- Videos show as a still.
 
 ## Athena's status API
 
@@ -178,14 +234,16 @@ ssh -N -L 8091:127.0.0.1:8091 <your-pi>   # leave this running
 uv run pi-display-microservice run --preview board.png
 ```
 
-Run the tests with `uv run python -m pytest`. They use stand-ins for the hardware and for Athena (`tests/conftest.py`), so they run anywhere. After changing the board's design or `assets/athena.svg`, redraw the images with `uv run --with resvg-py scripts/render_images.py`.
+With an `album_url`, `run` starts on the photos. A preview has no buttons to change page, so add `--page status` to start on Athena's status instead.
+
+Run the tests with `uv run python -m pytest`. They use stand-ins for the hardware, for Athena and for Google Photos (`tests/conftest.py`), so they run anywhere. With the git hooks installed (see [Keeping secrets out of GitHub](#keeping-secrets-out-of-github)), they run before every commit too. After changing the board's design or `assets/athena.svg`, redraw the images with `uv run --with resvg-py scripts/render_images.py`.
 
 ## Adding features
 
 Some ideas: more pages (the calendar, the weather, your portfolio), buttons that do things, or richer animations. Here's where each kind of change goes.
 
 **Changing what's drawn.**
-- Drawing is all in `board.py`:
+- The photo page is drawn in `slideshow.py`. Athena's status is drawn in `board.py`:
   - `_headline` and `_sub` hold the large and small text beside the shield.
   - `_details` holds the bottom half.
   - `_draw_shield` draws the shield and its animations.
@@ -193,12 +251,12 @@ Some ideas: more pages (the calendar, the weather, your portfolio), buttons that
 - Add a case to `EXAMPLES` in `tests/test_board.py`, and check the result with `--preview`.
 
 **Using the buttons.**
-- `screen.wait()` returns the button pressed: `"A"` or `"B"` (left side), `"X"` or `"Y"` (right side), or `None`.
-- At the moment, `run_board` in `app.py` treats any press as "screen on or off". To give buttons their own actions, look at which one it was there. For example: `A` for the screen, `X` and `Y` to change pages.
+- `screen.wait()` returns the button pressed: `"A"` or `"B"` (left side, top and bottom), `"X"` or `"Y"` (right side), or `None`.
+- `run_board` in `app.py` decides what each one does: `A` the screen, `B` the page, and `X` and `Y` like and dislike on the photos. On Athena's status, `X` and `Y` are free.
 - The tests' `FakeScreen` (`tests/test_app.py`) presses buttons for you.
 
 **More pages.**
-- Keep the current page in `run_board`, and give `Board` a way to draw each one.
+- The pages are in `run_board`'s `pages`, in the order `B` goes through them. To add one, add it there, and draw it where `run_board` draws the photos. The slideshow shows the shape a page takes: a `render(now)` that returns the 320x240 picture.
 - Pages that don't depend on Athena (a clock, the weather) can still show while Athena is offline.
 
 **New information from Athena**, such as your next calendar event or your portfolio's value. This takes a change on both sides:
@@ -206,7 +264,7 @@ Some ideas: more pages (the calendar, the weather, your portfolio), buttons that
 2. **Here:** read it in `status.parse()` into a new field on `Status`, with a default for when it's missing, so the board still works with an older Athena. Then draw it, and hide it when it's missing.
 
 **Information from elsewhere**, such as the weather.
-- The board can fetch things itself, but do it like `client.py`: on a thread of its own, never in the drawing loop, keeping the latest answer for the loop to read.
+- The board can fetch things itself, but do it like `client.py` and `album.py`: on a thread of its own, never in the drawing loop, keeping the latest answer for the loop to read.
 - Remember that anything the board fetches leaves your network. That's fine for the weather; keep anything personal in Athena.
 
 **The LED.** `Board.led()` returns which of red, green and blue are on, for a given status and moment. Flashing is just a different answer at different moments.
@@ -235,13 +293,19 @@ It pulls the latest code, updates the packages and restarts the service.
   - an `athena_url` that isn't Athena
   - an Athena with a newer API
 - **The screen stays blank after installing:** reboot if the installer asked you to, and check `journalctl -u pi-display-microservice`.
+- **There's no photo page:** set `album_url` in `config.toml`, and restart the board.
+- **The photo page shows a message in red instead of photos:** the board couldn't read the album or download its photos, and the message says why, for example:
+  - an `album_url` that isn't a share link, or an album that's no longer shared
+  - no internet: the photos it has already downloaded keep showing, and it tries again every 5 minutes
+
+  `uv run pi-display-microservice check` says what Google Photos answered.
 
 ## Keeping secrets out of GitHub
 
-This repo has the same protections as Athena. Only `config.toml` can hold anything private, Athena's token, and it's git-ignored.
+This repo has the same protections as Athena. Only `config.toml` can hold anything private (Athena's token and your album's share link), and it's git-ignored. Your photos and likes are kept outside the repo, in `~/.local/share/pi-display-microservice/`.
 
-- **On the computer you develop on:** run `bash scripts/install-git-hooks.sh` once, with gitleaks installed (`brew install gitleaks`). Then every commit and push is checked for secrets, and for anything in your git-ignored `.personal-blocklist`.
-- **On GitHub:** CI runs the same scan on every push, along with the tests. Protect `main` so it only accepts changes that pass both checks, "Secret scan" and "Tests".
+- **On the computer you develop on:** run `bash scripts/install-git-hooks.sh` once, with gitleaks installed (`brew install gitleaks`). Then every commit and push is checked for secrets, album share links among them, and for anything in your git-ignored `.personal-blocklist`. Each commit must pass the tests, too (`scripts/pre-commit.sh`). To skip the checks once, use `--no-verify`.
+- **On GitHub:** CI runs the same scan and the tests on every push, and on every pull request into `main`, as it would be once merged. Work on `dev`, and bring changes into `main` with a pull request. Protect `main` so it only accepts pull requests that pass both checks, "Secret scan" and "Tests".
 - **On the Pi:** the installer turns off `git push` for its clone, so nothing can be pushed from there.
 
 ## License

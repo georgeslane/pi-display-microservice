@@ -1,11 +1,12 @@
-# Scans and tests every push and pull request. With main protected so it only accepts
-# changes that pass both jobs, the Pi, which installs main, only ever gets code that's
-# been through them.
+# Scans and tests every push, and every pull request into main: work happens on dev, and
+# reaches main through a pull request. With main protected so it only accepts changes that
+# pass both jobs, the Pi, which installs main, only ever gets code that's been through them.
 name: CI
 
 on:
   push:
   pull_request:
+    branches: [main] # tested as it would be once merged
 
 # Read-only, with no secrets: nothing here needs to change the repo or reach anything private.
 permissions:
@@ -34,5 +35,6 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: ./.github/actions/setup-gitleaks # so the tests of the secret scan's own rules run too
       - run: uv sync --locked # fails if uv.lock is out of date
       - run: uv run python -m pytest

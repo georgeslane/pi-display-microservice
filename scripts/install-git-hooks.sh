@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Check every commit and push from this clone for secrets and personal data before it
-# leaves this machine (see scripts/check-secrets.sh). Run it once on the computer you
-# develop on, not on the Pi, which can't push:
+# leaves this machine (see scripts/check-secrets.sh), and run the tests before every
+# commit (scripts/pre-commit.sh). Run it once on the computer you develop on, not on the
+# Pi, which can't push:
 #
 #   brew install gitleaks
 #   bash scripts/install-git-hooks.sh
@@ -31,15 +32,19 @@ for hook in pre-commit pre-push; do
 done
 
 mkdir -p "$hooks"
-for hook in pre-commit pre-push; do
-  cat >"$hooks/$hook" <<EOF
+# Each hook runs a script from the repo, so pulling a change to one changes what the hook does.
+cat >"$hooks/pre-commit" <<EOF
 #!/bin/sh
 $MARK
-exec bash "\$(git rev-parse --show-toplevel)/scripts/check-secrets.sh" $hook
+exec bash "\$(git rev-parse --show-toplevel)/scripts/pre-commit.sh"
 EOF
-  chmod +x "$hooks/$hook"
-done
-echo "Commits and pushes from this clone are now checked for secrets and personal data."
+cat >"$hooks/pre-push" <<EOF
+#!/bin/sh
+$MARK
+exec bash "\$(git rev-parse --show-toplevel)/scripts/check-secrets.sh" pre-push
+EOF
+chmod +x "$hooks/pre-commit" "$hooks/pre-push"
+echo "Commits and pushes from this clone are now checked for secrets and personal data, and commits must pass the tests."
 
 if [[ ! -f .personal-blocklist ]]; then
   cat >.personal-blocklist <<'EOF'

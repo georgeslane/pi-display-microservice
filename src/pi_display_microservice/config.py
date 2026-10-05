@@ -4,11 +4,18 @@ defaults, so the board runs without a config file at all."""
 from __future__ import annotations
 
 import dataclasses
+import os
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_PATH = "config.toml"
+
+
+def data_dir() -> Path:
+    """Where the board keeps what it downloads and learns: the album's photos, and your likes."""
+    base = os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share"
+    return Path(base) / "pi-display-microservice"
 
 
 class ConfigError(Exception):
@@ -24,6 +31,7 @@ class Config:
     timezone: str = ""  # for the clock; "" uses Athena's
     wait_seconds: float = 25.0  # how long each request lets Athena wait for news (at most 30)
     retry_seconds: float = 5.0  # how soon to try again when Athena doesn't answer
+    album_url: str = ""  # a Google Photos album's share link, for the photo page; "" for no photos
 
 
 def load_config(path: str | Path | None = None) -> Config:

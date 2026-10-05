@@ -1,9 +1,9 @@
-"""The board's main loop: keep the screen showing Athena's latest status.
+"""The board's main loop: keep the screen showing Athena's latest status, or the photos.
 
 Reading the status never waits on the network: the client (client.py) keeps the latest
-one up to date on its own thread. This loop draws it several times a second while
-something on screen moves, and once a second otherwise, and sends a frame only when it
-has changed.
+one up to date on its own thread, as the album (album.py) does the photos. This loop
+draws the page on screen several times a second while Athena is busy, and once a second
+otherwise, and sends a frame only when it has changed.
 """
 
 from __future__ import annotations
@@ -15,11 +15,14 @@ from collections.abc import Callable
 from pi_display_microservice.board import LED_OFF, Board
 from pi_display_microservice.config import Config
 from pi_display_microservice.screen import Screen
+from pi_display_microservice.slideshow import Slideshow
 from pi_display_microservice.status import Snapshot, State, Status
 
 ACTIVE_FPS = 6  # while something on screen is moving
 IDLE_FPS = 1
 DEMO_SECONDS = 5  # how long the demo shows each example
+PRESS_GAP = 0.3  # presses closer together than this are a button bouncing, not you
+PHOTOS, STATUS = "photos", "status"  # the pages, in the order B goes through them
 
 
 class Boards:
@@ -42,15 +45,27 @@ def run_board(
     read: Callable[[], Status],
     screen: Screen,
     *,
+    slideshow: Slideshow | None = None,
+    page: str | None = None,
     led: bool = True,
     once: bool = False,
     clock: Callable[[], float] = time.time,
 ) -> None:
-    """Keep ``screen`` showing the status from ``read()``. Runs until interrupted, or for one frame with ``once``.
+    """Keep ``screen`` showing the status from ``read()``, and the photos too if there's a ``slideshow``.
 
-    Any button turns the screen off or back on. It also comes on by itself while Athena
-    is working or waiting for you, so you never miss an approval.
+    Runs until interrupted, or for one frame with ``once``. It starts on ``page`` (PHOTOS or STATUS),
+    or the first there is.
+
+    The buttons: A turns the screen off and on again, and B moves to the next page. On the
+    photos, X likes the photo and Y dislikes it. While the screen is off, any of them turns
+    it back on.
+
+    The screen also comes on by itself while Athena is working or waiting for you, showing
+    its status, so you never miss an approval. For the same reason, an approval takes over
+    from the photos until it's answered.
     """
+    pages = [PHOTOS, STATUS] if slideshow else [STATUS]
+    chosen = pages.index(page) if page else 0  # the page B last moved to
     shown: bytes | None = None
     lit: tuple[bool, bool, bool] | None = None
     backlight: bool | None = None
@@ -69,12 +84,14 @@ def run_board(
             offline_since = 0.0
         active = s.state in (State.WORKING, State.APPROVAL)
         board = board_for(status)
+        # Athena's status shows when it needs you, and when it's why the screen is on.
+        page_on_screen = STATUS if s.state is State.APPROVAL or not wanted else pages[chosen]
 
         if (on := wanted or active) != backlight:
             screen.set_backlight(on)
             backlight, shown = on, None
         if on:
-            frame = board.render(s, now)
+            frame = slideshow.render(now) if slideshow and page_on_screen == PHOTOS else board.render(s, now)
             if (data := frame.tobytes()) != shown:  # unchanged frames aren't sent again
                 screen.show(frame)
                 shown = data
@@ -84,8 +101,18 @@ def run_board(
 
         if once:
             return
-        if screen.wait(1 / (ACTIVE_FPS if active else IDLE_FPS)) and now - last_press > 0.3:
-            wanted, last_press = not wanted, now
+        button = screen.wait(1 / (ACTIVE_FPS if active else IDLE_FPS))
+        if not button or 0 <= now - last_press <= PRESS_GAP:  # (a clock set back isn't a bounce)
+            continue
+        last_press = now
+        if not on:
+            wanted = True  # any button wakes the screen
+        elif button == "A":
+            wanted = False  # off, or as soon as Athena no longer needs it
+        elif button == "B":
+            chosen, wanted = (pages.index(page_on_screen) + 1) % len(pages), True
+        elif slideshow and page_on_screen == PHOTOS and button in ("X", "Y"):
+            (slideshow.like if button == "X" else slideshow.dislike)(now)
 
 
 def demo(clock: Callable[[], float] = time.time) -> Callable[[], Status]:

@@ -13,3 +13,8 @@ led = true
 # The name and timezone on the board. Empty means whatever Athena says.
 name = ""
 timezone = ""
+
+# The photo page: a Google Photos album's share link. In Google Photos, open the album,
+# choose Share, then Create link. Anyone with the link can see the album, so keep it here,
+# where git can't reach it. Empty means no photo page.
+album_url = ""
