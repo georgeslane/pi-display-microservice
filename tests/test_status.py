@@ -65,3 +65,8 @@ def test_moves_hermes_times_onto_this_clock():
 
 def test_offline_by_default():
     assert not Status().online and Status().snapshot.state is State.OFFLINE
+
+
+def test_reads_which_approval_the_board_can_answer_but_never_the_boards_own_fields():
+    s = parse(answer(state="approval", approval_id="a1", answering="approve", answer_error="no"), NOW).snapshot
+    assert (s.approval_id, s.answering, s.answer_error) == ("a1", "", "")

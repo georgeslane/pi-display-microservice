@@ -82,7 +82,7 @@ class FakeScreen:
         return [args[0] for name, *args in self.log if name == kind]
 
 
-def run(states, presses=(), board=None, slideshow=None, page=None):
+def run(states, presses=(), board=None, slideshow=None, page=None, answer=None):
     board = board or SpyBoard()
     screen = FakeScreen(presses)
     reads = iter(Status(Snapshot(state)) if isinstance(state, State) else state for state in states)
@@ -93,6 +93,7 @@ def run(states, presses=(), board=None, slideshow=None, page=None):
             screen,
             slideshow=slideshow,
             page=page,
+            answer=answer,
             clock=itertools.count(1000).__next__,
         )
     return screen
@@ -206,3 +207,18 @@ def test_demo_cycles_through_examples():
         clock.now = t
         states.append(read().snapshot.state)
     assert states == [State.IDLE, State.WORKING, State.WORKING, State.APPROVAL, State.IDLE, State.OFFLINE, State.IDLE]
+
+
+def test_x_approves_and_y_denies_what_hermes_is_waiting_for():
+    answered = []
+    waiting = Status(Snapshot(State.APPROVAL, approval_id="a1"))
+    run([waiting] * 3, presses=["X", "Y"], slideshow=SpySlideshow(), answer=lambda i, ok: answered.append((i, ok)))
+    assert answered == [("a1", True), ("a1", False)]
+
+
+def test_x_and_y_leave_alone_what_the_board_cant_answer_or_already_has():
+    answered = []
+    asked_in_a_terminal = Status(Snapshot(State.APPROVAL))
+    on_its_way = Status(Snapshot(State.APPROVAL, approval_id="a1", answering="approve"))
+    run([asked_in_a_terminal, on_its_way, on_its_way], presses=["X", "Y"], answer=lambda *a: answered.append(a))
+    assert answered == []

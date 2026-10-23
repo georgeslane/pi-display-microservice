@@ -48,7 +48,11 @@ class Snapshot:
     last_error: str = ""  # why it failed ("" if it didn't),
     last_finished: float = 0.0  # and when it ended
     updated: float = 0.0  # when it last changed
+    approval_id: str = ""  # approval: the plugin's id for it, if the board can answer it ("" if not)
     problem: str = ""  # offline: why, if it's something other than Hermes not running
+    # Set by the board, never by Hermes: an answer to the approval, pressed on the board.
+    answering: str = ""  # "approve" or "deny", while Hermes takes it in
+    answer_error: str = ""  # why it didn't go through
 
 
 @dataclass(frozen=True)
@@ -65,6 +69,7 @@ class Status:
         return self.snapshot.state is not State.OFFLINE
 
 
+_BOARDS_OWN = ("problem", "answering", "answer_error")  # what the board decides, not Hermes
 _TIMES = ("started", "deadline", "last_finished", "updated")
 
 
@@ -84,7 +89,7 @@ def parse(payload: Any, now: float) -> Status:
         )
     raw = payload["status"]
     known = {f.name: f for f in dataclasses.fields(Snapshot)}
-    values = {name: raw[name] for name in known if name in raw and name != "problem"}
+    values = {name: raw[name] for name in known if name in raw and name not in _BOARDS_OWN}
     try:
         values["state"] = State(values.get("state", "idle"))
     except ValueError:

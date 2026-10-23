@@ -12,7 +12,7 @@ import urllib.request
 from pathlib import Path
 
 import pytest
-from test_client import free_port
+from test_client import free_port, wait_until
 
 from pi_display_microservice.client import HermesClient
 from pi_display_microservice.status import Snapshot, State, parse
@@ -340,3 +340,188 @@ def test_a_port_in_use_is_logged_not_raised(monkeypatch, in_hermes, tracker, cap
         assert sys.modules[plugin._SHARED].server is None
     finally:
         taken.close()
+
+
+# -- turns that move session, or never say they've ended
+
+
+def test_a_turn_ends_even_if_hermes_moved_it_to_a_new_session(tracker):
+    # Compressing a long conversation starts a new session mid-turn; the turn keeps its id.
+    tracker.pre_llm_call(session_id="s1", turn_id="t1", user_message="Summarise my week", platform="telegram")
+    tracker.pre_tool_call(tool_name="web_search", session_id="s2", turn_id="t1", tool_call_id="c1")
+    assert snapshot(tracker).step == "Using web_search"
+    tracker.on_session_end(session_id="s2", turn_id="t1", completed=True)
+    assert (snapshot(tracker).state, snapshot(tracker).last_task) == (State.IDLE, "Summarise my week")
+
+    tracker.pre_llm_call(session_id="s2", turn_id="t2", user_message="And next week?", platform="telegram")
+    assert snapshot(tracker).task == "And next week?"  # the follow up, not the first message
+    tracker.on_session_end(session_id="s2", turn_id="t2", completed=True)
+    assert snapshot(tracker).state is State.IDLE
+
+
+def test_a_follow_up_replaces_a_turn_whose_end_was_never_heard(tracker):
+    tracker.pre_llm_call(session_id="s1", turn_id="t1", user_message="First", platform="telegram")
+    tracker.pre_llm_call(session_id="s1", turn_id="t2", user_message="Follow up", platform="telegram")
+    assert snapshot(tracker).task == "Follow up"
+    tracker.on_session_end(session_id="s1", turn_id="t2", completed=True)
+    assert snapshot(tracker).state is State.IDLE  # not back to "First"
+
+
+def test_a_turn_hermes_stops_mentioning_is_dropped_in_the_end(tracker, clock):
+    tracker.pre_llm_call(**TURN, turn_id="t1")
+    clock.now += plugin.STALE_SECONDS - 1
+    tracker.pre_tool_call(tool_name="terminal", session_id="s1", turn_id="t1", tool_call_id="c1")  # still going
+    clock.now += plugin.STALE_SECONDS - 1
+    assert snapshot(tracker).state is State.WORKING
+    clock.now += 2
+    assert snapshot(tracker).state is State.IDLE
+
+
+def test_but_not_while_it_waits_for_you(tracker, clock):
+    tracker.pre_llm_call(**TURN, turn_id="t1")
+    tracker.pre_approval_request(**APPROVAL)
+    clock.now += plugin.STALE_SECONDS * 2
+    assert snapshot(tracker).state is State.APPROVAL
+
+
+# -- answering approvals from the board
+
+
+class Approvals:
+    """A stand-in for Hermes' queue of approvals waiting in a chat."""
+
+    def __init__(self, pending=None, answered=1):
+        self.queued = pending if pending is not None else [{"command": APPROVAL["command"], "request_id": "r1"}]
+        self.answered = answered
+        self.resolved = []
+
+    def pending(self, session_key):
+        if isinstance(self.queued, Exception):
+            raise self.queued
+        return self.queued
+
+    def resolve(self, session_key, choice, request_id):
+        if isinstance(self.answered, Exception):
+            raise self.answered
+        self.resolved.append((session_key, choice, request_id))
+        return self.answered
+
+
+def answerable(clock, **approvals):
+    tracker = plugin.Tracker(clock, approval_timeout=lambda: 300, approvals=Approvals(**approvals))
+    tracker.pre_llm_call(**TURN, turn_id="t1")
+    tracker.pre_approval_request(**APPROVAL)
+    return tracker
+
+
+@pytest.mark.parametrize(("approve", "choice"), [(True, "once"), (False, "deny")])
+def test_the_board_can_answer_an_approval_waiting_in_a_chat(clock, approve, choice):
+    tracker = answerable(clock)
+    approval_id = snapshot(tracker).approval_id
+    assert approval_id
+    assert tracker.decide(approval_id, approve) == (200, {"answered": 1, "choice": choice})
+    assert tracker.approvals.resolved == [("agent:main:telegram:dm:42", choice, "r1")]  # as /approve or /deny would
+
+
+@pytest.mark.parametrize(
+    ("approvals", "code", "says"),
+    [
+        ({"pending": []}, 409, "Answer this one in Telegram."),  # asked in a terminal, say: answer it there
+        ({"pending": RuntimeError("not Hermes")}, 409, "Answer this one in Telegram."),
+        ({"answered": 0}, 404, "isn't waiting for that any more"),  # answered in the chat meanwhile
+        ({"answered": RuntimeError("oops")}, 500, "couldn't take the answer"),
+    ],
+)
+def test_says_why_an_answer_didnt_go_through(clock, approvals, code, says):
+    tracker = answerable(clock, **approvals)
+    offered = tracker.answer()["status"]["approval_id"]
+    assert bool(offered) is (code != 409)  # the board isn't offered what it can't answer
+    approval_id = offered or next(iter(tracker._approvals.values())).id
+    status, body = tracker.decide(approval_id, True)
+    assert status == code and says in body["error"]
+
+
+def test_an_answer_for_an_approval_thats_gone_is_refused(clock):
+    tracker = answerable(clock)
+    assert tracker.decide("no-such-approval", True)[0] == 404
+
+
+def test_shows_the_oldest_approval_the_one_the_chat_would_answer(clock):
+    tracker = answerable(clock)
+    first = snapshot(tracker).approval_id
+    clock.now += 1
+    tracker.pre_approval_request(**{**APPROVAL, "command": "rm -rf dist", "pattern_key": "rm_rf_2"})
+    assert snapshot(tracker).approval_id == first
+
+
+def post(address, body, content_type="application/json", **headers):
+    data = body if isinstance(body, bytes) else json.dumps(body).encode()
+    request = urllib.request.Request(address, data, {"Content-Type": content_type, **headers}, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return response.status, json.load(response)
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.load(exc)
+
+
+def test_answers_come_as_json_to_v1_approval(clock):
+    tracker = answerable(clock)
+    served = plugin.StatusServer(tracker, "127.0.0.1", 0, token="s3cret")
+    served.start()
+    try:
+        base, auth = f"http://127.0.0.1:{served.port}", {"Authorization": "Bearer s3cret"}
+        approval_id = snapshot(tracker).approval_id
+        good = {"id": approval_id, "choice": "deny"}
+        assert post(f"{base}/v1/approval", good)[0] == 401
+        # A web page could send a form, but not JSON, without asking first.
+        assert (
+            post(f"{base}/v1/approval", b"id=x&choice=approve", "application/x-www-form-urlencoded", **auth)[0] == 415
+        )
+        assert post(f"{base}/v1/approval", {"id": approval_id, "choice": "maybe"}, **auth)[0] == 400
+        assert post(f"{base}/v1/approval", b"not json", **auth)[0] == 400
+        assert post(f"{base}/elsewhere", good, **auth)[0] == 404
+        assert post(f"{base}/v1/approval", good, **auth) == (200, {"answered": 1, "choice": "deny"})
+        options = urllib.request.Request(f"{base}/v1/approval", method="OPTIONS")
+        with pytest.raises(urllib.error.HTTPError) as refused:  # so a browser's "may I?" is always no
+            urllib.request.urlopen(options, timeout=5)
+        assert refused.value.code == 405
+    finally:
+        served.close()
+
+
+def test_the_boards_client_answers_and_shows_it_on_its_way(clock):
+    tracker = answerable(clock)
+    served = plugin.StatusServer(tracker, "127.0.0.1", 0)
+    served.start()
+    try:
+        client = HermesClient(f"http://127.0.0.1:{served.port}")
+        client.refresh()
+        s = client.latest().snapshot
+        client.answer(s.approval_id, True)
+        assert client.latest().snapshot.answering == "approve"
+        wait_until(lambda: tracker.approvals.resolved)
+        tracker.post_approval_response(**APPROVAL, choice="once")  # Hermes carries on
+        client.refresh()
+        assert client.latest().snapshot.state is State.WORKING
+    finally:
+        served.close()
+
+
+def test_the_boards_client_says_why_an_answer_didnt_go_through(clock):
+    tracker = answerable(clock, pending=[])
+    tracker._approvals[next(iter(tracker._approvals))].answerable = True  # offered, but then refused
+    tracker.approvals.answered = 0
+    served = plugin.StatusServer(tracker, "127.0.0.1", 0)
+    served.start()
+    try:
+        times = Clock()
+        client = HermesClient(f"http://127.0.0.1:{served.port}", clock=times)
+        client.refresh()
+        client.answer(client.latest().snapshot.approval_id, False)
+        wait_until(lambda: client.latest().snapshot.answer_error)
+        s = client.latest().snapshot
+        assert (s.answering, s.answer_error) == ("", "Hermes isn't waiting for that any more.")
+        times.now += 10  # said for a few seconds, then gone
+        assert client.latest().snapshot.answer_error == ""
+    finally:
+        served.close()
