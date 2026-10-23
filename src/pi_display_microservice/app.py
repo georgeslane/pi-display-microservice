@@ -115,8 +115,8 @@ def run_board(
             chosen, wanted = (pages.index(page_on_screen) + 1) % len(pages), True
         elif slideshow and page_on_screen == PHOTOS and button in ("X", "Y"):
             (slideshow.like if button == "X" else slideshow.dislike)(now)
-        elif answer and s.state is State.APPROVAL and s.approval_id and not s.answering and button in ("X", "Y"):
-            answer(s.approval_id, button == "X")
+        elif answer and s.state is State.APPROVAL and not s.answering and button in ("X", "Y"):
+            answer(s.approval_id, button == "X")  # with no id, it's one the board can't answer, and says so
 
 
 def demo(clock: Callable[[], float] = time.time) -> Callable[[], Status]:

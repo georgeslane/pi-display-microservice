@@ -26,13 +26,15 @@ The board has two pages: the photos, if you've given it an album, and Hermes' st
 | X, top right | On the photos: likes the photo on screen, so it comes up more often. When Hermes is waiting for your approval: approves |
 | Y, bottom right | On the photos: dislikes the photo on screen, so it comes up less often. When Hermes is waiting for your approval: denies |
 
-Approving or denying on the board works like `/approve` or `/deny` in the chat: the screen says "Approving…" until Hermes carries on, and if the answer doesn't go through, it says why. It only works for approvals Hermes is waiting for in a chat, like Telegram. One asked in a terminal has to be answered there, so the board doesn't offer the buttons.
+Approving or denying on the board works like `/approve` or `/deny` in the chat: the screen says "Approving…" until Hermes carries on, and if the answer doesn't go through, it says why. It only works for approvals Hermes is waiting for in a messaging chat, like Telegram or your phone's. One asked in the Hermes app, or in a terminal, has to be answered there: press X or Y and the board says so.
 
 While the screen is off, any button turns it back on. It also comes on by itself whenever Hermes is working or needs you, showing Hermes' status, and goes off again when Hermes is done. A tool waiting for your approval takes over from the photos too, until it's answered, so you never miss one. The LED shows what Hermes is doing, whichever page is on screen.
 
 ## How it works
 
 Hermes and the board are separate programs. A small plugin in Hermes ([`hermes_plugin/`](hermes_plugin/__init__.py)) follows what Hermes is doing through its hooks, and publishes it through a small HTTP API, which the board asks. Either can be restarted, updated or replaced without the other, and the board can tell when Hermes isn't running, because nothing answers.
+
+Hermes runs sessions in more than one program: the gateway (`hermes gateway run`) runs your messaging chats, and the Hermes app, the dashboard's chat and `hermes --tui` run theirs in another. The plugin is in both. The one in the gateway serves the board, and the others send it what their sessions are doing (`POST /v1/events`), so the board shows the latest turn wherever it is. A process that stops saying it's there, because the app was closed mid-reply for instance, is forgotten within a minute.
 
 ```
  Hermes Agent                                pi-display-microservice
@@ -238,6 +240,8 @@ Times are Unix timestamps in seconds.
 - The board ignores fields it doesn't know, and uses defaults for any that are missing.
 - So either side can be updated first.
 
+**From Hermes' other processes:** `POST /v1/events`, with the same token and JSON, and a body like `{"source": "<process>", "hook": "pre_tool_call", "fields": {"tool_name": "terminal", ...}}`, or `"hook": "heartbeat"` every 15 seconds to say it's still there. Only the plugin sends these.
+
 **Answering an approval:** `POST /v1/approval`, with `Content-Type: application/json` and the same token, and a body like `{"id": "<approval_id>", "choice": "approve"}` (or `"deny"`). The plugin answers as `/approve` or `/deny` in the chat would. JSON only, because a web page can't send JSON to another address without asking first, and this server always says no, so no page you visit can answer for you.
 
 **Errors:**
@@ -325,7 +329,8 @@ It pulls the latest code, updates the packages and restarts the service.
 - **The board says "Offline" while Hermes runs:**
   - Run `uv run pi-display-microservice check`.
   - Check the plugin is there and enabled: `hermes plugins list` should show `pi-display-status` as enabled. If it doesn't, run `bash scripts/install-hermes-plugin.sh`.
-  - Only Hermes' gateway serves the status, so Hermes has to be running as `hermes gateway`, not only as `hermes` in a terminal. `hermes gateway status` says whether it is.
+  - Only Hermes' gateway serves the status, so it has to be running for the board to show anything, including sessions in the app. `hermes gateway status` says whether it is.
+- **Sessions in the app don't show, but chats on your phone do:** restart the app after updating the plugin, so it loads the new one. If it still doesn't show, look for `pi-display-status` in the app's log: it says if it can't reach the gateway.
   - If the plugin couldn't have its port, Hermes' log says why: look for `pi-display-status` in `hermes logs`, or in the gateway service's journal.
 - **The board says "CAN'T SHOW HERMES":** Hermes answered, but the board couldn't use the answer. The board shows the reason, for example:
   - a wrong token

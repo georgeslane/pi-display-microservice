@@ -25,10 +25,12 @@ import hmac
 import json
 import logging
 import os
+import queue
 import sys
 import threading
 import time
 import types
+import urllib.request
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -42,6 +44,8 @@ API_VERSION = 1  # the version of the board's status API this serves
 NAME = "Hermes"
 MAX_WAIT = 30.0  # the longest a request may wait for a change
 STALE_SECONDS = 60 * 60  # a turn Hermes says nothing about for this long has ended without saying so
+HEARTBEAT_SECONDS = 15.0  # how often another Hermes process says it's still there
+SILENT_SECONDS = 60.0  # a process that hasn't, for this long, has gone, with whatever it was doing
 HOOKS = (
     "pre_llm_call",
     "pre_tool_call",
@@ -51,7 +55,30 @@ HOOKS = (
     "on_session_end",
 )
 # Hermes' names for its platforms, as the board should say them: "Approve in Telegram".
-CHANNELS = {"cli": "the terminal", "whatsapp": "WhatsApp", "imessage": "iMessage", "api_server": "the API"}
+CHANNELS = {
+    "cli": "the terminal",
+    "tui": "the app",  # the Hermes app, the dashboard's chat, and `hermes --tui`
+    "whatsapp": "WhatsApp",
+    "imessage": "iMessage",
+    "api_server": "the API",
+}
+# What another Hermes process passes on about each hook: what the tracker uses, and nothing else.
+FORWARDED = (
+    "session_id",
+    "turn_id",
+    "platform",
+    "parent_session_id",
+    "tool_name",
+    "tool_call_id",
+    "command",
+    "description",
+    "pattern_key",
+    "session_key",
+    "surface",
+    "completed",
+    "failed",
+    "interrupted",
+)
 
 
 @dataclass
@@ -63,6 +90,7 @@ class _Turn:
     seen: float  # when Hermes last said anything about it
     tools: list[str] = field(default_factory=list)  # used so far, in the order first used
     running: dict[str, str] = field(default_factory=dict)  # tool call id -> tool, for the ones running now
+    source: str = ""  # the Hermes process it's running in, if not this one
 
 
 @dataclass
@@ -76,6 +104,7 @@ class _Approval:
     answerable: bool  # waiting in Hermes' queue of chat approvals, so the board can answer it
     request_id: str | None = None  # Hermes' id for it, when it has one
     waiting: int = 1  # Hermes asks once for several tool calls wanting the same thing
+    source: str = ""  # the Hermes process asking, if not this one
 
 
 class HermesApprovals:
@@ -111,6 +140,7 @@ class Tracker:
         # all the way through (compressing a long conversation starts a new session mid-turn).
         self._turns: dict[str, _Turn] = {}
         self._approvals: dict[tuple[str, str], _Approval] = {}
+        self._heard: dict[str, float] = {}  # other Hermes processes, and when each last said anything
         self._last_task, self._last_error, self._last_finished = "", "", 0.0
         self._updated = clock()
         self._closing = False
@@ -128,6 +158,7 @@ class Tracker:
         user_message: Any = None,
         platform: str = "",
         parent_session_id: str = "",
+        forwarded_from: str = "",
         **_: Any,
     ) -> None:
         """A turn starts: you've asked Hermes something."""
@@ -138,7 +169,8 @@ class Tracker:
             # A session has one turn at a time, so any other turn of this one is over.
             for key in [k for k, t in self._turns.items() if session_id and t.session_id == session_id]:
                 del self._turns[key]
-            self._turns[turn_id or session_id] = _Turn(session_id, _text(user_message), _channel(platform), now, now)
+            turn = _Turn(session_id, _text(user_message), _channel(platform), now, now, source=forwarded_from)
+            self._turns[turn_id or session_id] = turn
             self._publish()
 
     def pre_tool_call(
@@ -172,6 +204,7 @@ class Tracker:
         pattern_key: str = "",
         session_key: str = "",
         surface: str = "",
+        forwarded_from: str = "",
         **_: Any,
     ) -> None:
         """Hermes needs your approval to go on."""
@@ -179,16 +212,18 @@ class Tracker:
             return  # Hermes' own model decides these, without asking you
         key = (session_key, pattern_key or command)
         timeout = self.approval_timeout()
-        # Hermes queues a chat's approval before it calls this, so it's there to find.
+        # Hermes queues a chat's approval before it calls this, so it's there to find. Only this
+        # process's queue can be answered from here: another process's approval has to be answered there.
         try:
-            queued = [e for e in self.approvals.pending(session_key) if e.get("command", command) == command]
+            pending = [] if forwarded_from else self.approvals.pending(session_key)
+            queued = [e for e in pending if e.get("command", command) == command]
         except Exception:
             queued = []  # not waiting in a chat (a terminal asks there), or not Hermes: the board can't answer
         with self._changed:
             if key in self._approvals:
                 self._approvals[key].waiting += 1
                 return
-            turn = self._latest_turn()
+            turn = self._latest_turn(forwarded_from)
             now = self.clock()
             self._approvals[key] = _Approval(
                 id=uuid.uuid4().hex,
@@ -199,6 +234,7 @@ class Tracker:
                 deadline=now + timeout if timeout > 0 else 0.0,
                 answerable=bool(queued),
                 request_id=queued[-1].get("request_id") if queued else None,
+                source=forwarded_from,
             )
             self._publish()
 
@@ -245,9 +281,18 @@ class Tracker:
         seconds for a change first."""
         with self._changed:
             self._drop_stale()
+            self._drop_silent()
             if wait > 0 and after == self.version:
                 self._changed.wait_for(lambda: self._closing or after != self.version, min(wait, MAX_WAIT))
             return self._payload()
+
+    def receive(self, source: str, hook: str, fields: dict[str, Any]) -> None:
+        """An event from the plugin in another Hermes process (see Forwarder), or "heartbeat" to say it's there."""
+        with self._changed:
+            self._heard[source] = self.clock()
+        if hook in HOOKS:
+            known = {k: v for k, v in fields.items() if k in (*FORWARDED, "user_message")}
+            getattr(self, hook)(**known, forwarded_from=source)
 
     def decide(self, approval_id: str, approve: bool) -> tuple[int, dict[str, Any]]:
         """Approve or deny the approval the board showed as ``approval_id``, as /approve or /deny in the
@@ -346,14 +391,105 @@ class Tracker:
         if stale:
             self._publish()
 
-    def _latest_turn(self) -> _Turn | None:
-        return max(self._turns.values(), key=lambda t: t.started, default=None)
+    def _drop_silent(self) -> None:
+        """Forget what other Hermes processes were doing once they stop saying they're there: one closed
+        mid-turn (the app, say) never says the turn has ended."""
+        now = self.clock()
+        silent = {source for source, heard in self._heard.items() if now - heard > SILENT_SECONDS}
+        if not silent:
+            return
+        for source in silent:
+            del self._heard[source]
+        turns = [k for k, t in self._turns.items() if t.source in silent]
+        approvals = [k for k, a in self._approvals.items() if a.source in silent]
+        for key in turns:
+            del self._turns[key]
+        for key in approvals:
+            del self._approvals[key]
+        if turns or approvals:
+            self._publish()
+
+    def _latest_turn(self, source: str | None = None) -> _Turn | None:
+        """The turn that started last: of all, or of one process's."""
+        turns = [t for t in self._turns.values() if source is None or t.source == source]
+        return max(turns, key=lambda t: t.started, default=None)
 
     def _publish(self) -> None:
         """Something changed (the lock is held): a new version, and wake the requests waiting for one."""
         self._changes += 1
         self._updated = self.clock()
         self._changed.notify_all()
+
+
+class Forwarder:
+    """Passes this process's hook events on to the plugin serving the board, in Hermes' gateway.
+
+    Hermes runs the app's sessions (and the dashboard's chat, and ``hermes --tui``) in a process
+    of its own, which the gateway, and so the board, would otherwise never hear about. Events go
+    on a thread of their own, so Hermes never waits for them. Once there have been any, the thread
+    also says every so often that this process is still there, so the board can tell when it's gone.
+    """
+
+    def __init__(self, url: str, token: str = ""):
+        self.url = url
+        self.headers = {"Content-Type": "application/json", "User-Agent": "pi-display-status"}
+        if token:
+            self.headers["Authorization"] = f"Bearer {token}"
+        self.source = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        self._events: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue(maxsize=1000)
+        self._start = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._failing = False
+
+    def hooks(self) -> dict[str, Callable[..., None]]:
+        """A callback for each of Hermes' hooks, which passes it on."""
+
+        def forward(hook: str) -> Callable[..., None]:
+            def callback(**kwargs: Any) -> None:
+                self.send(hook, kwargs)
+
+            return callback
+
+        return {hook: forward(hook) for hook in HOOKS}
+
+    def send(self, hook: str, kwargs: dict[str, Any]) -> None:
+        fields: dict[str, Any] = {k: kwargs[k] for k in FORWARDED if isinstance(kwargs.get(k), str | bool)}
+        if "user_message" in kwargs:
+            fields["user_message"] = _text(kwargs["user_message"])
+        with self._start:
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._run, name="pi-display-forward", daemon=True)
+                self._thread.start()
+        try:
+            self._events.put_nowait((hook, fields))
+        except queue.Full:  # the gateway isn't taking them: let them go, rather than hold Hermes up
+            pass
+
+    def _run(self) -> None:
+        while True:
+            try:
+                hook, fields = self._events.get(timeout=HEARTBEAT_SECONDS)
+            except queue.Empty:
+                hook, fields = "heartbeat", {}
+            self._post({"source": self.source, "hook": hook, "fields": fields})
+
+    def _post(self, body: dict[str, Any]) -> None:
+        request = urllib.request.Request(self.url, json.dumps(body).encode(), self.headers)
+        try:
+            with urllib.request.urlopen(request, timeout=3):
+                pass
+        except Exception as exc:
+            if not self._failing:
+                log.warning(
+                    "pi-display-status: can't tell the board what this Hermes session is doing (%s). "
+                    "Is Hermes' gateway running?",
+                    exc,
+                )
+            self._failing = True
+            return
+        if self._failing:
+            log.info("pi-display-status: telling the board what this Hermes session is doing again")
+            self._failing = False
 
 
 class StatusServer:
@@ -377,23 +513,38 @@ class StatusServer:
                 self._send(200, tracker.answer(query.get("after", ""), wait))
 
             def do_POST(self) -> None:
-                if urlsplit(self.path).path != "/v1/approval":
-                    return self._send(405 if urlsplit(self.path).path == "/v1/status" else 404, {"error": "Not here."})
+                path = urlsplit(self.path).path
+                if path not in ("/v1/approval", "/v1/events"):
+                    return self._send(405 if path == "/v1/status" else 404, {"error": "Not here."})
                 if not self._allowed():
                     return
                 # JSON only: a web page can't send that to another site without asking first, which
-                # this server never agrees to, so no page you open can answer for you.
+                # this server never agrees to, so no page you open can answer for you, or pretend to be Hermes.
                 if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
                     return self._send(415, {"error": "Send JSON."})
                 try:
                     length = int(self.headers.get("Content-Length", 0))
-                    body = json.loads(self.rfile.read(min(length, 4096)) or b"{}")
+                    body = json.loads(self.rfile.read(min(length, 65536)) or b"{}")
+                    if path == "/v1/events":
+                        return self._event(body)
                     approval_id, choice = str(body["id"]), body["choice"]
                     if choice not in ("approve", "deny"):
                         raise ValueError(choice)
-                except (ValueError, KeyError, TypeError):
+                except (ValueError, KeyError, TypeError, AttributeError):
+                    if path == "/v1/events":
+                        return self._send(400, {"error": 'Send {"source", "hook", "fields"}.'})
                     return self._send(400, {"error": 'Send {"id": "<approval_id>", "choice": "approve" or "deny"}.'})
                 self._send(*tracker.decide(approval_id, choice == "approve"))
+
+            def _event(self, body: dict[str, Any]) -> None:
+                """An event from the plugin in another Hermes process (Forwarder)."""
+                source, hook, fields = str(body["source"]), str(body["hook"]), body.get("fields") or {}
+                if not source or hook not in (*HOOKS, "heartbeat") or not isinstance(fields, dict):
+                    raise ValueError(hook)
+                if not all(isinstance(v, str | bool) for v in fields.values()):
+                    raise ValueError("fields")
+                tracker.receive(source, hook, fields)
+                self._send(200, {"ok": True})
 
             def _allowed(self) -> bool:
                 if token and not hmac.compare_digest(self.headers.get("Authorization", ""), f"Bearer {token}"):
@@ -451,27 +602,42 @@ def shared() -> types.ModuleType:
     state = sys.modules.get(_SHARED)
     if state is None:
         state = types.ModuleType(_SHARED)
-        state.tracker, state.server = Tracker(), None
+        state.tracker, state.server, state.forwarder = Tracker(), None, None
         sys.modules[_SHARED] = state
     return state
 
 
 def register(ctx: Any) -> None:
-    """Called by Hermes when it loads the plugin."""
-    tracker = shared().tracker
-    for hook in HOOKS:
-        ctx.register_hook(hook, getattr(tracker, hook))
-    # Every Hermes command loads plugins, but only the gateway keeps running, so it alone serves the
-    # status (a quick `hermes plugins list` mustn't take the port).
+    """Called by Hermes when it loads the plugin, in each of its processes."""
+    # Only the gateway keeps running all the time, so it serves the status (a quick `hermes plugins
+    # list` mustn't take the port). Any other process tells it what its own sessions are doing.
     if in_gateway(sys.argv):
+        tracker = shared().tracker
+        hooks = {hook: getattr(tracker, hook) for hook in HOOKS}
         start_server()
+    else:
+        hooks = forwarder().hooks()
+    for hook, callback in hooks.items():
+        ctx.register_hook(hook, callback)
+
+
+def forwarder() -> Forwarder:
+    state = shared()
+    if state.forwarder is None:
+        host, port = _address()
+        state.forwarder = Forwarder(f"http://{host}:{port}/v1/events", os.environ.get("PI_DISPLAY_TOKEN", ""))
+    return state.forwarder
+
+
+def _address() -> tuple[str, str]:
+    return os.environ.get("PI_DISPLAY_HOST") or "127.0.0.1", os.environ.get("PI_DISPLAY_PORT") or "8091"
 
 
 def start_server() -> None:
     state = shared()
     if state.server:
         return
-    host, port = os.environ.get("PI_DISPLAY_HOST") or "127.0.0.1", os.environ.get("PI_DISPLAY_PORT") or "8091"
+    host, port = _address()
     try:
         state.server = StatusServer(state.tracker, host, int(port), os.environ.get("PI_DISPLAY_TOKEN", ""))
     except ValueError:
