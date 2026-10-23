@@ -216,9 +216,8 @@ def test_x_approves_and_y_denies_what_hermes_is_waiting_for():
     assert answered == [("a1", True), ("a1", False)]
 
 
-def test_x_and_y_leave_alone_what_the_board_cant_answer_or_already_has():
+def test_x_and_y_dont_answer_twice():
     answered = []
-    asked_in_a_terminal = Status(Snapshot(State.APPROVAL))
     on_its_way = Status(Snapshot(State.APPROVAL, approval_id="a1", answering="approve"))
-    run([asked_in_a_terminal, on_its_way, on_its_way], presses=["X", "Y"], answer=lambda *a: answered.append(a))
+    run([on_its_way] * 3, presses=["X", "Y"], answer=lambda *a: answered.append(a))
     assert answered == []

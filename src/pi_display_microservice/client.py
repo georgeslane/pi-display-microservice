@@ -77,6 +77,10 @@ class HermesClient:
     def answer(self, approval_id: str, approve: bool) -> None:
         """Approve or deny the approval the board is showing, as /approve or /deny in the chat would. It's
         sent on a thread of its own, and latest() shows it's on its way, or why it didn't go through."""
+        if not approval_id:  # asked somewhere Hermes only takes the answer from, such as the app
+            where = self._latest.snapshot.channel or "the chat"
+            self._reply = _Reply("", approve, self.clock(), error=f"Answer this one in {where}.")
+            return
         reply = _Reply(approval_id, approve, self.clock())
         self._reply = reply
         threading.Thread(target=self._send_answer, args=(reply,), name="hermes-answer", daemon=True).start()

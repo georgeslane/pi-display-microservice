@@ -525,3 +525,126 @@ def test_the_boards_client_says_why_an_answer_didnt_go_through(clock):
         assert client.latest().snapshot.answer_error == ""
     finally:
         served.close()
+
+
+# -- sessions in Hermes' other processes: the app, the dashboard's chat, `hermes --tui`
+
+APP_TURN = {"session_id": "app-s1", "turn_id": "app-t1", "user_message": "Plan my trip", "platform": "tui"}
+
+
+def test_another_hermes_process_tells_the_gateway_what_its_sessions_are_doing(tracker, server):
+    forward = plugin.Forwarder(f"{url(server)}/v1/events").hooks()
+    forward["pre_llm_call"](**APP_TURN, conversation_history=[{"role": "user"}], is_first_turn=True)
+    wait_until(lambda: snapshot(tracker).state is State.WORKING)
+    assert (snapshot(tracker).task, snapshot(tracker).channel) == ("Plan my trip", "the app")
+    forward["pre_tool_call"](tool_name="web_search", session_id="app-s1", turn_id="app-t1", tool_call_id="c1")
+    wait_until(lambda: snapshot(tracker).step == "Using web_search")
+    forward["on_session_end"](session_id="app-s1", turn_id="app-t1", completed=True, failed=False)
+    wait_until(lambda: snapshot(tracker).state is State.IDLE)
+    assert snapshot(tracker).last_task == "Plan my trip"
+
+
+def test_the_latest_turn_shows_whichever_process_it_is_in(tracker, clock):
+    tracker.pre_llm_call(**TURN, turn_id="t1")  # on your phone, in the gateway itself
+    clock.now += 1
+    tracker.receive("app", "pre_llm_call", APP_TURN)
+    assert snapshot(tracker).task == "Plan my trip"
+    tracker.receive("app", "on_session_end", {"session_id": "app-s1", "turn_id": "app-t1", "completed": True})
+    assert snapshot(tracker).task == "Is it going to rain?"
+
+
+def test_an_approval_in_the_app_says_to_answer_it_there(clock):
+    tracker = plugin.Tracker(clock, approval_timeout=lambda: 300, approvals=Approvals())
+    tracker.pre_llm_call(**TURN, turn_id="t1")  # a phone chat is going too
+    tracker.receive("app", "pre_llm_call", APP_TURN)
+    tracker.receive("app", "pre_approval_request", {**APPROVAL, "session_key": "tui:app-s1", "surface": "tui"})
+    s = snapshot(tracker)
+    assert (s.state, s.channel, s.approval_id) == (State.APPROVAL, "the app", "")  # not answerable from the board
+    approval_id = next(iter(tracker._approvals.values())).id
+    assert tracker.decide(approval_id, True) == (409, {"error": "Answer this one in the app."})
+    assert tracker.approvals.resolved == []
+
+
+def test_a_process_that_goes_quiet_is_forgotten_and_one_that_says_its_there_isnt(tracker, clock):
+    tracker.receive("app", "pre_llm_call", APP_TURN)
+    for _ in range(5):
+        clock.now += plugin.HEARTBEAT_SECONDS
+        tracker.receive("app", "heartbeat", {})
+        assert snapshot(tracker).state is State.WORKING
+    clock.now += plugin.SILENT_SECONDS + 1  # the app was closed mid-turn
+    assert snapshot(tracker).state is State.IDLE
+
+
+def test_events_from_other_processes_are_checked(clock):
+    tracker = plugin.Tracker(clock)
+    served = plugin.StatusServer(tracker, "127.0.0.1", 0, token="s3cret")
+    served.start()
+    try:
+        events, auth = f"http://127.0.0.1:{served.port}/v1/events", {"Authorization": "Bearer s3cret"}
+        good = {"source": "app", "hook": "pre_llm_call", "fields": APP_TURN}
+        assert post(events, good)[0] == 401
+        assert post(events, b"source=app", "application/x-www-form-urlencoded", **auth)[0] == 415
+        assert post(events, {**good, "hook": "rm_rf"}, **auth)[0] == 400
+        assert post(events, {**good, "fields": {"user_message": ["a", "list"]}}, **auth)[0] == 400
+        assert post(events, {**good, "source": ""}, **auth)[0] == 400
+        assert post(events, good, **auth) == (200, {"ok": True})
+        assert snapshot(tracker).task == "Plan my trip"
+    finally:
+        served.close()
+
+
+def test_the_forwarder_passes_on_only_what_the_board_needs_and_says_its_there(monkeypatch):
+    monkeypatch.setattr(plugin, "HEARTBEAT_SECONDS", 0.05)
+    sent = []
+    forwarder = plugin.Forwarder("http://127.0.0.1:1/v1/events")
+    monkeypatch.setattr(forwarder, "_post", sent.append)
+    forwarder.hooks()["pre_llm_call"](
+        **{**APP_TURN, "user_message": [{"type": "text", "text": "Plan my trip"}]},
+        conversation_history=[{"role": "user", "content": "everything we've said"}],
+        model="m",
+    )
+    wait_until(lambda: any(body["hook"] == "heartbeat" for body in sent))
+    first = sent[0]
+    assert first["hook"] == "pre_llm_call" and first["source"] == forwarder.source
+    assert first["fields"] == APP_TURN  # the words only, and none of the conversation
+
+
+def test_hermes_never_waits_for_a_gateway_that_isnt_there(caplog):
+    forwarder = plugin.Forwarder(f"http://127.0.0.1:{free_port()}/v1/events")
+    started = time.monotonic()
+    with caplog.at_level(logging.WARNING, "pi_display_status"):
+        for _ in range(20):
+            forwarder.hooks()["pre_tool_call"](tool_name="terminal", session_id="s", turn_id="t", tool_call_id="c")
+        assert time.monotonic() - started < 0.5
+        wait_until(lambda: "Is Hermes' gateway running?" in caplog.text)
+    assert caplog.text.count("can't tell the board") == 1  # said once, not for every event
+
+
+def test_outside_the_gateway_the_hooks_go_to_the_gateway(monkeypatch, in_hermes):
+    monkeypatch.setattr(sys, "argv", ["hermes", "gateway", "run"])
+    plugin.register(Context())  # the gateway, serving
+    gateway = sys.modules[plugin._SHARED]
+    try:
+        monkeypatch.setattr(sys, "argv", ["hermes", "--tui"])
+        app = load("hermes_plugins.pi_display_status_in_the_app")
+        monkeypatch.delitem(sys.modules, plugin._SHARED)  # the app is a process of its own
+        ctx = Context()
+        app.register(ctx)
+        assert sys.modules[plugin._SHARED].server is None  # the app doesn't serve
+        ctx.hooks["pre_llm_call"](**APP_TURN)
+        client = HermesClient(f"http://127.0.0.1:{in_hermes}")
+        wait_until(lambda: client.refresh() and client.latest().snapshot.task == "Plan my trip")
+    finally:
+        gateway.server.close()
+
+
+def test_pressing_x_or_y_for_an_approval_the_board_cant_answer_says_where_to(clock, server, tracker):
+    tracker.receive("app", "pre_llm_call", APP_TURN)
+    tracker.receive("app", "pre_approval_request", {**APPROVAL, "session_key": "tui:app-s1", "surface": "tui"})
+    times = Clock()
+    client = HermesClient(url(server), clock=times)
+    client.refresh()
+    client.answer(client.latest().snapshot.approval_id, True)  # no id to answer with
+    assert client.latest().snapshot.answer_error == "Answer this one in the app."
+    times.now += 10
+    assert client.latest().snapshot.answer_error == ""
