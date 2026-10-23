@@ -39,13 +39,13 @@ EXAMPLES = {
     ),
     "hidden task": Snapshot(State.WORKING, channel="Telegram", started=NOW),
     "offline": Snapshot(State.OFFLINE, started=NOW - 3600),
-    "can't read Athena": Snapshot(State.OFFLINE, started=NOW, problem="Athena refused the token. Check config.toml."),
+    "can't read Hermes": Snapshot(State.OFFLINE, started=NOW, problem="Hermes refused the token. Check config.toml."),
 }
 
 
 @pytest.fixture(scope="module")
 def board():
-    return Board("Athena", "Europe/London")
+    return Board("Hermes", "Europe/London")
 
 
 @pytest.mark.parametrize("name", EXAMPLES)
@@ -79,7 +79,7 @@ def test_characters_the_font_lacks_are_dropped(board):
 
 
 def test_long_names_shrink_to_fit():
-    board = Board("Pallas Athena Parthenos")
+    board = Board("Pallas Hermes Parthenos")
     assert board.fonts["title"].getlength(board.title) <= RIGHT - LEFT
 
 
@@ -117,12 +117,12 @@ def test_time_formats():
     assert ago(86400 * 3) == "3 days ago"
 
 
-def test_offline_says_why_when_it_is_not_just_athena_being_down(board):
-    label, body, footer, _ = board._details(EXAMPLES["can't read Athena"], NOW)
+def test_offline_says_why_when_it_is_not_just_hermes_being_down(board):
+    label, body, footer, _ = board._details(EXAMPLES["can't read Hermes"], NOW)
     assert (label, body, footer) == (
-        "CAN'T SHOW ATHENA",
-        "Athena refused the token. Check config.toml.",
+        "CAN'T SHOW HERMES",
+        "Hermes refused the token. Check config.toml.",
         "journalctl -u pi-display-microservice -f",
     )
     label, body, footer, _ = board._details(EXAMPLES["offline"], NOW)
-    assert "isn't running" in body and footer == "journalctl -u pi-assistant -f"
+    assert "isn't running" in body and footer == "hermes gateway status"

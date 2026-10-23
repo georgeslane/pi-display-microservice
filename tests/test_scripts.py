@@ -23,6 +23,7 @@ STUBS = {
     "raspi-config": RECORD,
     "getent": RECORD,
     "journalctl": RECORD,
+    "hermes": RECORD,
     # sudo records the command; for `sudo tee [-a] FILE` it also does the writing, into the
     # sandbox: FILE itself if it's the boot config, otherwise a copy named after it.
     "sudo": RECORD
@@ -34,17 +35,23 @@ STUBS = {
     + 'if [ "$1" = cat ]; then [ -n "$OLD_BOARD" ]; exit; fi\n'
     + 'if [ "$1" = is-active ]; then [ -z "$BOARD_FAILS" ]; exit; fi\n',
 }
+# git: `rev-parse` prints a commit, and `diff` finds the Hermes plugin changed if PLUGIN_CHANGED is set.
+GIT = (
+    RECORD
+    + 'if [ "$1" = rev-parse ]; then echo abc123; fi\n'
+    + 'if [ "$1" = diff ] && [ -n "$PLUGIN_CHANGED" ]; then exit 1; fi\n'
+)
 
 
 @pytest.fixture
 def sandbox(tmp_path):
     repo = tmp_path / "pi-display-microservice"
-    for item in ["scripts", "deploy", "config.example.toml"]:
+    for item in ["scripts", "deploy", "hermes_plugin", "config.example.toml"]:
         (shutil.copytree if (REPO / item).is_dir() else shutil.copy)(REPO / item, repo / item)
     stubs, git_stub, files, home = (tmp_path / d for d in ("stubs", "git-stub", "written", "home"))
     for d in (stubs, git_stub, files, home):
         d.mkdir()
-    for path, script in [*((stubs / name, script) for name, script in STUBS.items()), (git_stub / "git", RECORD)]:
+    for path, script in [*((stubs / name, script) for name, script in STUBS.items()), (git_stub / "git", GIT)]:
         path.write_text(script)
         path.chmod(0o755)
     boot = tmp_path / "config.txt"
@@ -144,4 +151,45 @@ def test_update(sandbox):
     _, _, _, run = sandbox
     result, calls = run("update.sh", fake_git=True)
     assert result.returncode == 0, result.stderr
-    assert calls == ["git pull --ff-only", "uv sync --no-dev", "sudo systemctl restart pi-display-microservice"]
+    assert calls == [
+        "git rev-parse HEAD",
+        "git pull --ff-only",
+        "uv sync --no-dev",
+        "sudo systemctl restart pi-display-microservice",
+        "git diff --quiet abc123 HEAD -- hermes_plugin",
+    ]
+    assert "hermes gateway restart" not in result.stdout
+
+
+def test_update_says_when_hermes_needs_a_restart_for_the_new_plugin(sandbox):
+    _, _, _, run = sandbox
+    result, calls = run("update.sh", fake_git=True, plugin_changed=True)
+    assert result.returncode == 0, result.stderr
+    assert "when Hermes isn't busy: hermes gateway restart" in result.stdout
+    assert not any(call.startswith("hermes") for call in calls)  # restarting Hermes is left to you
+
+
+def test_installing_the_hermes_plugin_links_it_enables_it_and_restarts_hermes(sandbox, tmp_path):
+    repo, _, _, run = sandbox
+    link = tmp_path / "home" / ".hermes" / "plugins" / "pi-display-status"
+    for _ in range(2):  # and it's safe to run again
+        result, calls = run("install-hermes-plugin.sh")
+        assert result.returncode == 0, result.stderr
+        assert link.is_symlink() and link.resolve() == (repo / "hermes_plugin").resolve()  # so updates reach it
+        assert calls[-2:] == ["hermes plugins enable pi-display-status", "hermes gateway restart"]
+
+
+def test_the_hermes_plugin_isnt_installed_over_something_else(sandbox, tmp_path):
+    _, _, _, run = sandbox
+    (tmp_path / "home" / ".hermes" / "plugins" / "pi-display-status").mkdir(parents=True)
+    result, calls = run("install-hermes-plugin.sh")
+    assert result.returncode == 1 and calls == []
+    assert "isn't a link, so nothing was changed" in result.stderr
+
+
+def test_installing_the_hermes_plugin_needs_hermes(sandbox, tmp_path):
+    _, _, _, run = sandbox
+    (tmp_path / "stubs" / "hermes").unlink()
+    result, calls = run("install-hermes-plugin.sh")
+    assert result.returncode == 1 and calls == []
+    assert "Can't find the hermes command" in result.stderr

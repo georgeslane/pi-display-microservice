@@ -1,4 +1,4 @@
-"""Draws the status board: a 320x240 picture of what Athena is doing.
+"""Draws the status board: a 320x240 picture of what Hermes is doing.
 
 Only drawing happens here: app.py decides when, and screen.py puts the pictures on the
 screen. The shield is assets/athena.png, rendered from assets/athena.svg by
@@ -109,7 +109,7 @@ def ago(seconds: float) -> str:
 
 
 class Board:
-    def __init__(self, name: str = "Athena", timezone: str = "UTC"):
+    def __init__(self, name: str = "Hermes", timezone: str = "UTC"):
         self.title = name.upper()
         try:
             self.zone: ZoneInfo | None = ZoneInfo(timezone)
@@ -214,9 +214,9 @@ class Board:
             body = s.task or f"A request from {s.channel or 'you'}"
             return "TASK", body, self._trail(s.tools), MUTED
         if s.state is State.OFFLINE and s.problem:
-            return "CAN'T SHOW ATHENA", s.problem, "journalctl -u pi-display-microservice -f", FAILED
+            return "CAN'T SHOW HERMES", s.problem, "journalctl -u pi-display-microservice -f", FAILED
         if s.state is State.OFFLINE:
-            return "", "The assistant isn't running. See its log with:", "journalctl -u pi-assistant -f", MUTED
+            return "", "Hermes isn't running. Find out why with:", "hermes gateway status", MUTED
         if not s.last_finished:
             return "", "Nothing yet. Send a message to get started.", "", MUTED
         when = ago(now - s.last_finished)

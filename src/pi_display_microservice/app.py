@@ -1,8 +1,8 @@
-"""The board's main loop: keep the screen showing Athena's latest status, or the photos.
+"""The board's main loop: keep the screen showing Hermes' latest status, or the photos.
 
 Reading the status never waits on the network: the client (client.py) keeps the latest
 one up to date on its own thread, as the album (album.py) does the photos. This loop
-draws the page on screen several times a second while Athena is busy, and once a second
+draws the page on screen several times a second while Hermes is busy, and once a second
 otherwise, and sends a frame only when it has changed.
 """
 
@@ -26,7 +26,7 @@ PHOTOS, STATUS = "photos", "status"  # the pages, in the order B goes through th
 
 
 class Boards:
-    """A Board for the assistant's name and timezone, made again only if Athena reports new ones."""
+    """A Board for the assistant's name and timezone, made again only if Hermes reports new ones."""
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -60,7 +60,7 @@ def run_board(
     photos, X likes the photo and Y dislikes it. While the screen is off, any of them turns
     it back on.
 
-    The screen also comes on by itself while Athena is working or waiting for you, showing
+    The screen also comes on by itself while Hermes is working or waiting for you, showing
     its status, so you never miss an approval. For the same reason, an approval takes over
     from the photos until it's answered.
     """
@@ -84,7 +84,7 @@ def run_board(
             offline_since = 0.0
         active = s.state in (State.WORKING, State.APPROVAL)
         board = board_for(status)
-        # Athena's status shows when it needs you, and when it's why the screen is on.
+        # Hermes' status shows when it needs you, and when it's why the screen is on.
         page_on_screen = STATUS if s.state is State.APPROVAL or not wanted else pages[chosen]
 
         if (on := wanted or active) != backlight:
@@ -108,7 +108,7 @@ def run_board(
         if not on:
             wanted = True  # any button wakes the screen
         elif button == "A":
-            wanted = False  # off, or as soon as Athena no longer needs it
+            wanted = False  # off, or as soon as Hermes no longer needs it
         elif button == "B":
             chosen, wanted = (pages.index(page_on_screen) + 1) % len(pages), True
         elif slideshow and page_on_screen == PHOTOS and button in ("X", "Y"):
@@ -116,7 +116,7 @@ def run_board(
 
 
 def demo(clock: Callable[[], float] = time.time) -> Callable[[], Status]:
-    """Example states, a few seconds each, for checking the screen without Athena."""
+    """Example states, a few seconds each, for checking the screen without Hermes."""
     start = clock()
     task = "Check the weather in London and, if it's going to rain, put 'Take umbrella' in my calendar for 8am"
     examples = [

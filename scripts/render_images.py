@@ -37,7 +37,7 @@ def render_board() -> Path:
     start = datetime(2026, 10, 3, 14, 30, tzinfo=ZoneInfo("Europe/London")).timestamp()
     clock = [start]
     read = demo(lambda: clock[0])
-    board = Board("Athena", "Europe/London")
+    board = Board("Hermes", "Europe/London")
     frames = []
     for i in range(6):
         clock[0] = start + i * DEMO_SECONDS + 2.6

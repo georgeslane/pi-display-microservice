@@ -10,7 +10,7 @@ REPO = Path(__file__).resolve().parents[1]
 def test_runs_without_a_config_file(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     assert load_config() == Config()
-    assert Config().athena_url == "http://127.0.0.1:8091"  # Athena's own default
+    assert Config().hermes_url == "http://127.0.0.1:8091"  # where the plugin in Hermes serves, by default
 
 
 def test_the_example_is_the_defaults():
@@ -19,9 +19,18 @@ def test_the_example_is_the_defaults():
 
 def test_reads_settings(tmp_path):
     path = tmp_path / "config.toml"
-    path.write_text('athena_url = "http://athena.local:9000"\ntoken = "abc"\nled = false\nwait_seconds = 10\n')
+    path.write_text('hermes_url = "http://hermes.local:9000"\ntoken = "abc"\nled = false\nwait_seconds = 10\n')
     cfg = load_config(path)
-    assert (cfg.athena_url, cfg.token, cfg.led, cfg.wait_seconds) == ("http://athena.local:9000", "abc", False, 10.0)
+    assert (cfg.hermes_url, cfg.token, cfg.led, cfg.wait_seconds) == ("http://hermes.local:9000", "abc", False, 10.0)
+
+
+def test_a_config_from_when_the_board_showed_athena_still_works(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('athena_url = "http://127.0.0.1:9000"\n')
+    assert load_config(path).hermes_url == "http://127.0.0.1:9000"
+    path.write_text('athena_url = "http://127.0.0.1:9000"\nhermes_url = "http://127.0.0.1:8091"\n')
+    with pytest.raises(ConfigError, match="both hermes_url and athena_url"):
+        load_config(path)
 
 
 def test_the_photo_page_is_only_there_if_you_give_an_album(tmp_path):
@@ -46,7 +55,7 @@ def test_photos_and_scores_are_kept_in_the_users_data_folder(monkeypatch, tmp_pa
         ('led = "no"', "led should be a bool"),
         ("token = 7", "token should be a str"),
         ("wait_seconds = true", "wait_seconds should be a float"),
-        ('athena_url = "127.0.0.1:8091"', "should start with http://"),
+        ('hermes_url = "127.0.0.1:8091"', "should start with http://"),
         ("led = ", "isn't valid TOML"),
     ],
 )

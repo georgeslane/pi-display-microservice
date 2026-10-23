@@ -1,0 +1,11 @@
+name: pi-display-status
+version: 1.0.0
+description: Publishes what Hermes is doing for pi-display-microservice's status board, at GET /v1/status.
+author: pi-display-microservice
+provides_hooks:
+  - pre_llm_call
+  - pre_tool_call
+  - post_tool_call
+  - pre_approval_request
+  - post_approval_response
+  - on_session_end
