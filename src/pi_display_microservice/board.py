@@ -195,6 +195,8 @@ class Board:
         if s.state is State.WORKING:
             step = s.step or "Thinking"
             return step + "." * (int(now * 2) % 4) if step == "Thinking" else step
+        if s.state is State.APPROVAL and s.answering:  # pressed on the board, and on its way
+            return ("Approving" if s.answering == "approve" else "Denying") + "." * (int(now * 2) % 4)
         if s.state is State.APPROVAL:
             return f"Approve in {s.channel or 'the chat'}"
         return "Not running" if s.state is State.OFFLINE else "Ready"
@@ -212,6 +214,10 @@ class Board:
         """The bottom half: a label, the task (two lines) and a footer line."""
         if s.state in (State.WORKING, State.APPROVAL):
             body = s.task or f"A request from {s.channel or 'you'}"
+            if s.state is State.APPROVAL and s.answer_error:
+                return "TASK", body, self._footer(s.answer_error, "✗  "), FAILED
+            if s.state is State.APPROVAL and s.approval_id and not s.answering:
+                return "TASK", body, "✓  Top right approves   ·   ✗  bottom right denies", TEXT
             return "TASK", body, self._trail(s.tools), MUTED
         if s.state is State.OFFLINE and s.problem:
             return "CAN'T SHOW HERMES", s.problem, "journalctl -u pi-display-microservice -f", FAILED
@@ -223,6 +229,11 @@ class Board:
         if s.last_error:
             return "LAST TASK", s.last_task, f"✗  {s.last_error} · {when}", FAILED
         return "LAST TASK", s.last_task, f"✓  Done · {when}", DONE
+
+    def _footer(self, text: str, mark: str = "") -> str:
+        """``mark`` and ``text``, cut short to fit the footer line."""
+        font = self.fonts["footer"]
+        return mark + (wrap(self._clean(text), font, WIDTH - 2 * MARGIN - font.getlength(mark), 1) or [""])[0]
 
     def _trail(self, tools: tuple[str, ...]) -> str:
         """The tools used so far, newest last, trimmed from the front to fit."""

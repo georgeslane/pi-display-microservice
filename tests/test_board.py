@@ -1,3 +1,4 @@
+import dataclasses
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -9,9 +10,11 @@ from pi_display_microservice.board import (
     COLORS,
     EYE_RADIUS,
     EYES,
+    FAILED,
     LED_OFF,
     LEFT,
     RIGHT,
+    TEXT,
     Board,
     ago,
     duration,
@@ -126,3 +129,24 @@ def test_offline_says_why_when_it_is_not_just_hermes_being_down(board):
     )
     label, body, footer, _ = board._details(EXAMPLES["offline"], NOW)
     assert "isn't running" in body and footer == "hermes gateway status"
+
+
+def test_an_approval_the_board_can_answer_says_which_button_does_what(board):
+    waiting = dataclasses.replace(EXAMPLES["approval"], approval_id="a1")
+    _, _, footer, color = board._details(waiting, NOW)
+    assert (footer, color) == ("✓  Top right approves   ·   ✗  bottom right denies", TEXT)
+    assert board._details(EXAMPLES["approval"], NOW)[2] == ""  # asked somewhere the board can't answer
+    assert board._headline(waiting, NOW) == "Approve in Telegram"
+    assert board.render(waiting, NOW).size == (320, 240)
+
+
+def test_an_answer_shows_on_its_way_or_why_it_didnt_go_through(board):
+    approving = dataclasses.replace(EXAMPLES["approval"], approval_id="a1", answering="approve")
+    assert board._headline(approving, 100.0) == "Approving"
+    assert board._headline(dataclasses.replace(approving, answering="deny"), 100.5) == "Denying."
+    assert board._details(approving, NOW)[2] == ""  # no button hint once you've pressed one
+    refused = dataclasses.replace(EXAMPLES["approval"], approval_id="a1", answer_error="Answer this one in Telegram.")
+    _, _, footer, color = board._details(refused, NOW)
+    assert (footer, color) == ("✗  Answer this one in Telegram.", FAILED)
+    long = dataclasses.replace(refused, answer_error="Hermes couldn't take the answer " * 5)
+    assert board.fonts["footer"].getlength(board._details(long, NOW)[2]) <= 296  # cut to fit

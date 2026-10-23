@@ -23,8 +23,10 @@ The board has two pages: the photos, if you've given it an album, and Hermes' st
 |---|---|
 | A, top left | Turns the screen off, and on again |
 | B, bottom left | Moves to the next page: from the photos to Hermes' status, and back |
-| X, top right | On the photos: likes the photo on screen, so it comes up more often |
-| Y, bottom right | On the photos: dislikes the photo on screen, so it comes up less often |
+| X, top right | On the photos: likes the photo on screen, so it comes up more often. When Hermes is waiting for your approval: approves |
+| Y, bottom right | On the photos: dislikes the photo on screen, so it comes up less often. When Hermes is waiting for your approval: denies |
+
+Approving or denying on the board works like `/approve` or `/deny` in the chat: the screen says "Approving…" until Hermes carries on, and if the answer doesn't go through, it says why. It only works for approvals Hermes is waiting for in a chat, like Telegram. One asked in a terminal has to be answered there, so the board doesn't offer the buttons.
 
 While the screen is off, any button turns it back on. It also comes on by itself whenever Hermes is working or needs you, showing Hermes' status, and goes off again when Hermes is done. A tool waiting for your approval takes over from the photos too, until it's answered, so you never miss one. The LED shows what Hermes is doing, whichever page is on screen.
 
@@ -214,6 +216,7 @@ This is the whole contract between Hermes and the board. The plugin serves it (`
 | `status.task` | What you asked: the words of your message. |
 | `status.step` | What's happening now, such as "Thinking" or "Using terminal". |
 | `status.tools` | The tools used for this task so far, oldest first. |
+| `status.approval_id` | While waiting for approval: an id to answer it with (below), if the board can. Empty if it can't |
 | `status.tool`, `channel`, `deadline` | While waiting for approval: what Hermes wants to do, where to approve it, and when it will be denied, from Hermes' `approvals.timeout` (0 if never). |
 | `status.started` | When the task started. |
 | `status.last_task`, `last_error`, `last_finished` | When idle: the previous task, why it failed (empty if it didn't) and when it ended. |
@@ -225,21 +228,25 @@ Times are Unix timestamps in seconds.
 
 | Hook | The status |
 |---|---|
-| `pre_llm_call` | `working`: you've asked something. Subagents' turns count as part of the turn that started them |
+| `pre_llm_call` | `working`: you've asked something. Subagents' turns count as part of the turn that started them. Turns are followed by Hermes' id for each, which stays the same even when Hermes starts a new session mid-turn (compressing a long conversation does) |
 | `pre_tool_call`, `post_tool_call` | `step`: "Using" the tool, or "Thinking" between tools |
 | `pre_approval_request`, `post_approval_response` | `approval`, until you answer or it times out. Approvals Hermes' own model decides ("smart" ones) don't ask you, so they don't show |
-| `on_session_end` | `idle`. Hermes calls it at the end of every turn, so a turn that fails or is stopped shows as such (`last_error`) |
+| `on_session_end` | `idle`. Hermes calls it at the end of every turn, so a turn that fails or is stopped shows as such (`last_error`). In case one ends without it, a new message in the same conversation replaces it, and a turn Hermes says nothing about for an hour is dropped |
 
 **Rules that keep the two sides independent:**
 - The plugin may add fields anywhere, without changing `api`.
 - The board ignores fields it doesn't know, and uses defaults for any that are missing.
 - So either side can be updated first.
 
+**Answering an approval:** `POST /v1/approval`, with `Content-Type: application/json` and the same token, and a body like `{"id": "<approval_id>", "choice": "approve"}` (or `"deny"`). The plugin answers as `/approve` or `/deny` in the chat would. JSON only, because a web page can't send JSON to another address without asking first, and this server always says no, so no page you visit can answer for you.
+
 **Errors:**
 - 401: wrong or missing token
-- 404: wrong path
-- 405: not GET
-- 400: a `wait` that isn't a number
+- 404: wrong path; or for an answer, an approval Hermes isn't waiting for any more
+- 405: the wrong method for the path
+- 400: a `wait` that isn't a number, or an answer that isn't `{"id": ..., "choice": "approve" or "deny"}`
+- 409: an approval the board can't answer, such as one asked in a terminal
+- 415: an answer that isn't JSON
 
 To see it for yourself on the Pi:
 

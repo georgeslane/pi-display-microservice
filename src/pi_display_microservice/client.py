@@ -9,6 +9,7 @@ If Hermes doesn't answer, the board shows it as offline and tries again every
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import threading
@@ -16,6 +17,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlencode
 
@@ -24,6 +26,18 @@ from pi_display_microservice.status import Snapshot, State, Status, parse
 log = logging.getLogger(__name__)
 
 TIMEOUT_MARGIN = 10.0  # how much longer than the wait to give an answer before giving up on it
+ANSWER_TIMEOUT = 10.0  # how long to give Hermes to take an approval's answer
+ERROR_SECONDS = 8.0  # how long the board says an answer didn't go through
+
+
+@dataclass(frozen=True)
+class _Reply:
+    """An answer to an approval, pressed on the board."""
+
+    approval_id: str
+    approve: bool
+    sent: float
+    error: str = ""  # why it didn't go through, once it's known that it didn't
 
 
 class HermesClient:
@@ -42,12 +56,30 @@ class HermesClient:
             self.headers["Authorization"] = f"Bearer {token}"
         self.wait, self.retry, self.clock = wait, retry, clock
         self._latest = Status()  # offline, until Hermes answers
+        self._reply: _Reply | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
     def latest(self) -> Status:
-        """The newest status. Reading it never waits for the network."""
-        return self._latest
+        """The newest status, with any answer to its approval that's been pressed on the board. Reading
+        it never waits for the network."""
+        status, reply = self._latest, self._reply
+        s = status.snapshot
+        if reply is None or s.state is not State.APPROVAL or s.approval_id != reply.approval_id:
+            return status
+        if reply.error:
+            if self.clock() - reply.sent > ERROR_SECONDS:
+                return status
+            return dataclasses.replace(status, snapshot=dataclasses.replace(s, answer_error=reply.error))
+        answering = "approve" if reply.approve else "deny"
+        return dataclasses.replace(status, snapshot=dataclasses.replace(s, answering=answering))
+
+    def answer(self, approval_id: str, approve: bool) -> None:
+        """Approve or deny the approval the board is showing, as /approve or /deny in the chat would. It's
+        sent on a thread of its own, and latest() shows it's on its way, or why it didn't go through."""
+        reply = _Reply(approval_id, approve, self.clock())
+        self._reply = reply
+        threading.Thread(target=self._send_answer, args=(reply,), name="hermes-answer", daemon=True).start()
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name="hermes-poll", daemon=True)
@@ -83,6 +115,22 @@ class HermesClient:
             self._went_offline(exc)
             return False
 
+    def _send_answer(self, reply: _Reply) -> None:
+        body = json.dumps({"id": reply.approval_id, "choice": "approve" if reply.approve else "deny"}).encode()
+        url = self.url.removesuffix("/v1/status") + "/v1/approval"
+        headers = {**self.headers, "Content-Type": "application/json"}
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, body, headers), timeout=ANSWER_TIMEOUT):
+                return  # Hermes carries on, and its status says so
+        except urllib.error.HTTPError as exc:
+            error = _said(exc)
+        except Exception as exc:
+            error = "Couldn't reach Hermes."
+            log.debug("Answering the approval failed: %s", _reason(exc))
+        log.warning("Couldn't %s from the board: %s", "approve" if reply.approve else "deny", error)
+        if self._reply is reply:
+            self._reply = dataclasses.replace(reply, error=error, sent=self.clock())
+
     def _run(self) -> None:
         while not self._stop.is_set():
             if not self.refresh(self.wait):
@@ -99,6 +147,17 @@ class HermesClient:
         since = before.started if before.state is State.OFFLINE and before.started else self.clock()
         offline = Snapshot(State.OFFLINE, started=since, problem=problem)
         self._latest = Status(offline, self._latest.name, self._latest.timezone)
+
+
+def _said(exc: urllib.error.HTTPError) -> str:
+    """What the plugin said when it couldn't take an answer."""
+    if exc.code == 405:  # a plugin from before the board could answer
+        return "Update the board's plugin in Hermes to answer from here."
+    try:
+        said = json.load(exc).get("error")
+    except Exception:
+        said = None
+    return str(said) if said else f"Hermes answered {exc.code}."
 
 
 def _reason(exc: Exception) -> str:

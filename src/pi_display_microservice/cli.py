@@ -56,7 +56,8 @@ def show(
         what += ", and the photos from album_url"
     logging.getLogger(__name__).info("Showing %s%s", what, f", drawing into {preview}" if preview else "")
     try:
-        run_board(Boards(cfg), read, screen, slideshow=slideshow, page=page, led=cfg.led, once=once)
+        answer = client.answer if client else None
+        run_board(Boards(cfg), read, screen, slideshow=slideshow, page=page, answer=answer, led=cfg.led, once=once)
     finally:
         signal.signal(signal.SIGTERM, previous)
         screen.close()

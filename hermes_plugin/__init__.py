@@ -3,7 +3,9 @@
 Hermes calls the hooks below as it works: when a turn starts, a tool starts or finishes, an
 approval is asked for or answered, and a turn ends. The plugin keeps track of what they say
 and, inside Hermes' gateway (``hermes gateway run``), serves it the way the board expects:
-``GET /v1/status`` on 127.0.0.1:8091 (see the board's README, "The status API").
+``GET /v1/status`` on 127.0.0.1:8091 (see the board's README, "The status API"). The board
+can answer an approval Hermes is waiting for in a chat, with ``POST /v1/approval``, as
+/approve or /deny in the chat would.
 
 It can't slow Hermes down or stop it. Each hook only updates a few fields under a lock, and a
 problem with the server is logged, never raised.
@@ -39,6 +41,7 @@ log = logging.getLogger("pi_display_status")
 API_VERSION = 1  # the version of the board's status API this serves
 NAME = "Hermes"
 MAX_WAIT = 30.0  # the longest a request may wait for a change
+STALE_SECONDS = 60 * 60  # a turn Hermes says nothing about for this long has ended without saying so
 HOOKS = (
     "pre_llm_call",
     "pre_tool_call",
@@ -53,32 +56,60 @@ CHANNELS = {"cli": "the terminal", "whatsapp": "WhatsApp", "imessage": "iMessage
 
 @dataclass
 class _Turn:
+    session_id: str
     task: str  # what you asked
     channel: str  # where you asked it
     started: float
+    seen: float  # when Hermes last said anything about it
     tools: list[str] = field(default_factory=list)  # used so far, in the order first used
     running: dict[str, str] = field(default_factory=dict)  # tool call id -> tool, for the ones running now
 
 
 @dataclass
 class _Approval:
+    id: str  # for the board to say which one it's answering
+    session_key: str  # Hermes' name for the chat it's waiting in
     what: str  # what Hermes wants to do, e.g. "recursive delete"
     channel: str
     asked: float
     deadline: float  # when it's denied if you don't answer; 0 if never
+    answerable: bool  # waiting in Hermes' queue of chat approvals, so the board can answer it
+    request_id: str | None = None  # Hermes' id for it, when it has one
     waiting: int = 1  # Hermes asks once for several tool calls wanting the same thing
+
+
+class HermesApprovals:
+    """Hermes' own queue of approvals waiting in a chat: the one its /approve and /deny commands answer."""
+
+    def pending(self, session_key: str) -> list[dict[str, Any]]:
+        from tools.approval import list_gateway_approvals
+
+        return list_gateway_approvals(session_key)
+
+    def resolve(self, session_key: str, choice: str, request_id: str | None) -> int:
+        from tools.approval import resolve_gateway_approval
+
+        return resolve_gateway_approval(session_key, choice, request_id=request_id)
 
 
 class Tracker:
     """What Hermes is doing, from its hooks, in the board's status API's terms. Safe to use from any thread."""
 
-    def __init__(self, clock: Callable[[], float] = time.time, approval_timeout: Callable[[], float] | None = None):
+    def __init__(
+        self,
+        clock: Callable[[], float] = time.time,
+        approval_timeout: Callable[[], float] | None = None,
+        approvals: Any = None,
+    ):
         self.clock = clock
         self.approval_timeout = approval_timeout or _approval_timeout
+        self.approvals = approvals or HermesApprovals()
         self._changed = threading.Condition()
         self._boot = uuid.uuid4().hex[:8]  # so the version is new after Hermes restarts
         self._changes = 0
-        self._turns: dict[str, _Turn] = {}  # by session: each has at most one turn at a time
+        # By turn: Hermes gives each its own id, which, unlike the session's, stays the same
+        # all the way through (compressing a long conversation starts a new session mid-turn).
+        self._turns: dict[str, _Turn] = {}
         self._approvals: dict[tuple[str, str], _Approval] = {}
         self._last_task, self._last_error, self._last_finished = "", "", 0.0
         self._updated = clock()
@@ -91,31 +122,48 @@ class Tracker:
     # -- Hermes' hooks. Each takes the keywords Hermes passes, and ignores any others.
 
     def pre_llm_call(
-        self, session_id: str = "", user_message: Any = None, platform: str = "", parent_session_id: str = "", **_: Any
+        self,
+        session_id: str = "",
+        turn_id: str = "",
+        user_message: Any = None,
+        platform: str = "",
+        parent_session_id: str = "",
+        **_: Any,
     ) -> None:
         """A turn starts: you've asked Hermes something."""
-        if parent_session_id or not session_id:
+        if parent_session_id or not (turn_id or session_id):
             return  # a subagent's turn, which is part of its parent's
+        now = self.clock()
         with self._changed:
-            self._turns[session_id] = _Turn(_text(user_message), _channel(platform), self.clock())
+            # A session has one turn at a time, so any other turn of this one is over.
+            for key in [k for k, t in self._turns.items() if session_id and t.session_id == session_id]:
+                del self._turns[key]
+            self._turns[turn_id or session_id] = _Turn(session_id, _text(user_message), _channel(platform), now, now)
             self._publish()
 
-    def pre_tool_call(self, tool_name: str = "", session_id: str = "", tool_call_id: str = "", **_: Any) -> None:
+    def pre_tool_call(
+        self, tool_name: str = "", session_id: str = "", turn_id: str = "", tool_call_id: str = "", **_: Any
+    ) -> None:
         with self._changed:
-            turn = self._turns.get(session_id)
+            turn = self._turn(turn_id, session_id)
             if turn is None or not tool_name:
                 return
+            turn.seen = self.clock()
             turn.running[tool_call_id or tool_name] = tool_name
             if tool_name not in turn.tools:
                 turn.tools.append(tool_name)
             self._publish()
 
-    def post_tool_call(self, tool_name: str = "", session_id: str = "", tool_call_id: str = "", **_: Any) -> None:
+    def post_tool_call(
+        self, tool_name: str = "", session_id: str = "", turn_id: str = "", tool_call_id: str = "", **_: Any
+    ) -> None:
         with self._changed:
-            turn = self._turns.get(session_id)
-            if turn is None or turn.running.pop(tool_call_id or tool_name, None) is None:
+            turn = self._turn(turn_id, session_id)
+            if turn is None:
                 return
-            self._publish()
+            turn.seen = self.clock()
+            if turn.running.pop(tool_call_id or tool_name, None) is not None:
+                self._publish()
 
     def pre_approval_request(
         self,
@@ -131,20 +179,30 @@ class Tracker:
             return  # Hermes' own model decides these, without asking you
         key = (session_key, pattern_key or command)
         timeout = self.approval_timeout()
+        # Hermes queues a chat's approval before it calls this, so it's there to find.
+        try:
+            queued = [e for e in self.approvals.pending(session_key) if e.get("command", command) == command]
+        except Exception:
+            queued = []  # not waiting in a chat (a terminal asks there), or not Hermes: the board can't answer
         with self._changed:
             if key in self._approvals:
                 self._approvals[key].waiting += 1
                 return
             turn = self._latest_turn()
-            channel = turn.channel if turn else ""  # the board then says "Approve in the chat"
             now = self.clock()
-            what = description or command or "a command"
-            self._approvals[key] = _Approval(what, channel, now, now + timeout if timeout > 0 else 0.0)
+            self._approvals[key] = _Approval(
+                id=uuid.uuid4().hex,
+                session_key=session_key,
+                what=description or command or "a command",
+                channel=turn.channel if turn else "",  # the board then says "Approve in the chat"
+                asked=now,
+                deadline=now + timeout if timeout > 0 else 0.0,
+                answerable=bool(queued),
+                request_id=queued[-1].get("request_id") if queued else None,
+            )
             self._publish()
 
-    def post_approval_response(
-        self, command: str = "", pattern_key: str = "", session_key: str = "", surface: str = "", **_: Any
-    ) -> None:
+    def post_approval_response(self, command: str = "", pattern_key: str = "", session_key: str = "", **_: Any) -> None:
         """You've answered, or it timed out."""
         key = (session_key, pattern_key or command)
         with self._changed:
@@ -157,13 +215,20 @@ class Tracker:
                 self._publish()
 
     def on_session_end(
-        self, session_id: str = "", completed: bool = True, failed: bool = False, interrupted: bool = False, **_: Any
+        self,
+        session_id: str = "",
+        turn_id: str = "",
+        completed: bool = True,
+        failed: bool = False,
+        interrupted: bool = False,
+        **_: Any,
     ) -> None:
         """A turn has ended. (Hermes fires this at the end of every turn, however it ends.)"""
         with self._changed:
-            turn = self._turns.pop(session_id, None)
+            turn = self._turn(turn_id, session_id)
             if turn is None:
                 return
+            self._forget(turn)
             if failed:
                 error = "Failed"
             elif interrupted:
@@ -171,19 +236,39 @@ class Tracker:
             else:
                 error = "" if completed else "Didn't finish"
             self._last_task, self._last_error, self._last_finished = turn.task, error, self.clock()
-            if not self._turns:
-                self._approvals.clear()  # nothing's left running to approve for
             self._publish()
 
-    # -- the board's view
+    # -- the board
 
     def answer(self, after: str = "", wait: float = 0.0) -> dict[str, Any]:
         """The status, as the board asks for it: if ``after`` is the current version, wait up to ``wait``
         seconds for a change first."""
         with self._changed:
+            self._drop_stale()
             if wait > 0 and after == self.version:
                 self._changed.wait_for(lambda: self._closing or after != self.version, min(wait, MAX_WAIT))
             return self._payload()
+
+    def decide(self, approval_id: str, approve: bool) -> tuple[int, dict[str, Any]]:
+        """Approve or deny the approval the board showed as ``approval_id``, as /approve or /deny in the
+        chat would. Returns an HTTP status and a body saying what happened."""
+        with self._changed:
+            approval = next((a for a in self._approvals.values() if a.id == approval_id), None)
+        if approval is None:
+            return 404, {"error": "Hermes isn't waiting for that any more."}
+        if not approval.answerable:
+            return 409, {"error": f"Answer this one in {approval.channel or 'the chat'}."}
+        choice = "once" if approve else "deny"
+        try:
+            # Outside the lock: answering wakes Hermes, whose hooks then take it.
+            answered = self.approvals.resolve(approval.session_key, choice, approval.request_id)
+        except Exception as exc:
+            log.exception("pi-display-status: couldn't answer an approval")
+            return 500, {"error": f"Hermes couldn't take the answer ({type(exc).__name__})."}
+        if not answered:
+            return 404, {"error": "Hermes isn't waiting for that any more."}
+        log.info("pi-display-status: %s %s from the board", "approved" if approve else "denied", approval.what)
+        return 200, {"answered": answered, "choice": choice}
 
     def close(self) -> None:
         """Answer every waiting request now."""
@@ -201,6 +286,7 @@ class Tracker:
             "channel": "",
             "started": 0.0,
             "deadline": 0.0,
+            "approval_id": "",
             "last_task": self._last_task,
             "last_error": self._last_error,
             "last_finished": self._last_finished,
@@ -218,13 +304,15 @@ class Tracker:
                 started=turn.started,
             )
         if self._approvals:
-            approval = max(self._approvals.values(), key=lambda a: a.asked)
+            # The oldest, as it's the one an /approve or /deny in the chat would answer.
+            approval = min(self._approvals.values(), key=lambda a: a.asked)
             status.update(
                 state="approval",
                 tool=approval.what,
                 channel=approval.channel or status["channel"],
                 deadline=approval.deadline,
                 started=turn.started if turn else approval.asked,
+                approval_id=approval.id if approval.answerable else "",
             )
         return {
             "api": API_VERSION,
@@ -233,6 +321,30 @@ class Tracker:
             "assistant": {"name": NAME, "timezone": ""},  # "": the board's, since they share the Pi
             "status": status,
         }
+
+    def _turn(self, turn_id: str, session_id: str) -> _Turn | None:
+        """The turn a hook is about: by its id, or for a hook that doesn't give one, its session's."""
+        if turn_id and turn_id in self._turns:
+            return self._turns[turn_id]
+        return next((t for t in self._turns.values() if session_id and t.session_id == session_id), None)
+
+    def _forget(self, turn: _Turn) -> None:
+        for key in [k for k, t in self._turns.items() if t is turn]:
+            del self._turns[key]
+        if not self._turns:
+            self._approvals.clear()  # nothing's left running to approve for
+
+    def _drop_stale(self) -> None:
+        """Forget turns Hermes hasn't mentioned for a long time, in case one ended without the hook that
+        says so. (Not while one is waiting for an approval: that wait is up to you.)"""
+        if self._approvals:
+            return
+        now = self.clock()
+        stale = [t for t in self._turns.values() if now - t.seen > STALE_SECONDS]
+        for turn in stale:
+            self._forget(turn)
+        if stale:
+            self._publish()
 
     def _latest_turn(self) -> _Turn | None:
         return max(self._turns.values(), key=lambda t: t.started, default=None)
@@ -255,8 +367,8 @@ class StatusServer:
                 url = urlsplit(self.path)
                 if url.path != "/v1/status":
                     return self._send(404, {"error": "Not found. The status is at /v1/status."})
-                if token and not hmac.compare_digest(self.headers.get("Authorization", ""), f"Bearer {token}"):
-                    return self._send(401, {"error": "Wrong or missing token."})
+                if not self._allowed():
+                    return
                 query = dict(parse_qsl(url.query))
                 try:
                     wait = max(0.0, float(query.get("wait", 0)))
@@ -264,10 +376,35 @@ class StatusServer:
                     return self._send(400, {"error": "wait should be a number of seconds."})
                 self._send(200, tracker.answer(query.get("after", ""), wait))
 
-            def _refuse(self) -> None:
-                self._send(405, {"error": "Only GET."})
+            def do_POST(self) -> None:
+                if urlsplit(self.path).path != "/v1/approval":
+                    return self._send(405 if urlsplit(self.path).path == "/v1/status" else 404, {"error": "Not here."})
+                if not self._allowed():
+                    return
+                # JSON only: a web page can't send that to another site without asking first, which
+                # this server never agrees to, so no page you open can answer for you.
+                if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
+                    return self._send(415, {"error": "Send JSON."})
+                try:
+                    length = int(self.headers.get("Content-Length", 0))
+                    body = json.loads(self.rfile.read(min(length, 4096)) or b"{}")
+                    approval_id, choice = str(body["id"]), body["choice"]
+                    if choice not in ("approve", "deny"):
+                        raise ValueError(choice)
+                except (ValueError, KeyError, TypeError):
+                    return self._send(400, {"error": 'Send {"id": "<approval_id>", "choice": "approve" or "deny"}.'})
+                self._send(*tracker.decide(approval_id, choice == "approve"))
 
-            do_POST = do_PUT = do_PATCH = do_DELETE = _refuse
+            def _allowed(self) -> bool:
+                if token and not hmac.compare_digest(self.headers.get("Authorization", ""), f"Bearer {token}"):
+                    self._send(401, {"error": "Wrong or missing token."})
+                    return False
+                return True
+
+            def _refuse(self) -> None:
+                self._send(405, {"error": "Only GET /v1/status and POST /v1/approval."})
+
+            do_PUT = do_PATCH = do_DELETE = do_OPTIONS = _refuse
 
             def _send(self, code: int, body: dict[str, Any]) -> None:
                 data = json.dumps(body).encode()

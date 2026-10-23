@@ -47,6 +47,7 @@ def run_board(
     *,
     slideshow: Slideshow | None = None,
     page: str | None = None,
+    answer: Callable[[str, bool], None] | None = None,
     led: bool = True,
     once: bool = False,
     clock: Callable[[], float] = time.time,
@@ -57,8 +58,9 @@ def run_board(
     or the first there is.
 
     The buttons: A turns the screen off and on again, and B moves to the next page. On the
-    photos, X likes the photo and Y dislikes it. While the screen is off, any of them turns
-    it back on.
+    photos, X likes the photo and Y dislikes it. While Hermes waits for your approval, X
+    approves and Y denies, with ``answer(approval_id, approve)``. While the screen is off,
+    any of them turns it back on.
 
     The screen also comes on by itself while Hermes is working or waiting for you, showing
     its status, so you never miss an approval. For the same reason, an approval takes over
@@ -113,6 +115,8 @@ def run_board(
             chosen, wanted = (pages.index(page_on_screen) + 1) % len(pages), True
         elif slideshow and page_on_screen == PHOTOS and button in ("X", "Y"):
             (slideshow.like if button == "X" else slideshow.dislike)(now)
+        elif answer and s.state is State.APPROVAL and s.approval_id and not s.answering and button in ("X", "Y"):
+            answer(s.approval_id, button == "X")
 
 
 def demo(clock: Callable[[], float] = time.time) -> Callable[[], Status]:
