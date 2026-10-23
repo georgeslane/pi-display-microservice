@@ -1,9 +1,9 @@
-"""Keeps up with Athena: asks its status API what it's doing, on a thread of its own.
+"""Keeps up with Hermes: asks its status API what it's doing, on a thread of its own.
 
-Each request says which version of the status the board already has, and Athena holds
+Each request says which version of the status the board already has, and Hermes holds
 the answer until that changes or ``wait`` seconds pass. So a change reaches the screen
 straight away, while the board asks only about twice a minute when nothing happens.
-If Athena doesn't answer, the board shows it as offline and tries again every
+If Hermes doesn't answer, the board shows it as offline and tries again every
 ``retry`` seconds.
 """
 
@@ -26,7 +26,7 @@ log = logging.getLogger(__name__)
 TIMEOUT_MARGIN = 10.0  # how much longer than the wait to give an answer before giving up on it
 
 
-class AthenaClient:
+class HermesClient:
     def __init__(
         self,
         url: str,
@@ -41,7 +41,7 @@ class AthenaClient:
         if token:
             self.headers["Authorization"] = f"Bearer {token}"
         self.wait, self.retry, self.clock = wait, retry, clock
-        self._latest = Status()  # offline, until Athena answers
+        self._latest = Status()  # offline, until Hermes answers
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -50,15 +50,15 @@ class AthenaClient:
         return self._latest
 
     def start(self) -> None:
-        self._thread = threading.Thread(target=self._run, name="athena-poll", daemon=True)
+        self._thread = threading.Thread(target=self._run, name="hermes-poll", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
 
     def ask(self, wait: float = 0.0) -> Status:
-        """One request. With ``wait``, Athena answers once its status differs from the latest we have, or after
-        ``wait`` seconds. Raises OSError if Athena can't be reached, and ValueError if its answer isn't usable."""
+        """One request. With ``wait``, Hermes answers once its status differs from the latest we have, or after
+        ``wait`` seconds. Raises OSError if Hermes can't be reached, and ValueError if its answer isn't usable."""
         query: dict[str, Any] = {}
         if wait and self._latest.version:
             query = {"wait": f"{wait:g}", "after": self._latest.version}
@@ -68,14 +68,14 @@ class AthenaClient:
                 payload = json.load(response)
         except urllib.error.HTTPError as exc:
             if exc.code == 401:
-                raise ValueError("Athena refused the token. Check token in config.toml.") from None
-            raise ValueError(f"Athena's status API answered {exc.code}. Check athena_url in config.toml.") from None
+                raise ValueError("Hermes refused the token. Check token in config.toml.") from None
+            raise ValueError(f"Hermes' status API answered {exc.code}. Check hermes_url in config.toml.") from None
         except ValueError:  # not JSON, or not UTF-8
-            raise ValueError("Athena's answer wasn't JSON. Check athena_url in config.toml.") from None
+            raise ValueError("Hermes' answer wasn't JSON. Check hermes_url in config.toml.") from None
         return parse(payload, self.clock())
 
     def refresh(self, wait: float = 0.0) -> bool:
-        """Ask Athena once, and update latest() with the answer, or with "offline". True if it answered."""
+        """Ask Hermes once, and update latest() with the answer, or with "offline". True if it answered."""
         try:
             self._latest = self.ask(wait)
             return True
@@ -93,9 +93,9 @@ class AthenaClient:
         before = self._latest.snapshot
         if before.state is not State.OFFLINE or before.problem != problem:
             if problem:
-                log.warning("Can't use Athena's status: %s", problem)
+                log.warning("Can't use Hermes' status: %s", problem)
             else:
-                log.info("Athena isn't answering (%s); showing it as offline", _reason(exc))
+                log.info("Hermes isn't answering (%s); showing it as offline", _reason(exc))
         since = before.started if before.state is State.OFFLINE and before.started else self.clock()
         offline = Snapshot(State.OFFLINE, started=since, problem=problem)
         self._latest = Status(offline, self._latest.name, self._latest.timezone)

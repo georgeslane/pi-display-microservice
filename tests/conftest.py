@@ -12,15 +12,15 @@ import pytest
 from PIL import Image
 
 
-class FakeAthena:
-    """Athena's status API, as the README describes it, on a free port on this machine."""
+class FakeHermes:
+    """Hermes' status API, as the README describes it, on a free port on this machine."""
 
     def __init__(self, token: str = ""):
         self.token = token
         self.status: dict[str, Any] = {"state": "idle"}
-        self.assistant = {"name": "Athena", "timezone": "Europe/London"}
+        self.assistant = {"name": "Hermes", "timezone": "Europe/London"}
         self.api = 1
-        self.clock_offset = 0.0  # how far Athena's clock is ahead of ours
+        self.clock_offset = 0.0  # how far Hermes' clock is ahead of ours
         self.answer: tuple[int, bytes] | None = None  # answer every request with this instead
         self.requests: list[dict[str, str]] = []  # each request's query, plus its Authorization header
         self._changes = 0
@@ -69,7 +69,7 @@ class FakeAthena:
         return f"fake-{self._changes}"
 
     def set(self, **status: Any) -> None:
-        """Athena starts doing something else."""
+        """Hermes starts doing something else."""
         with self._changed:
             self.status = status
             self._changes += 1
@@ -93,8 +93,8 @@ class FakeAthena:
 
 
 @pytest.fixture
-def athena():
-    fake = FakeAthena()
+def hermes():
+    fake = FakeHermes()
     yield fake
     fake.close()
 

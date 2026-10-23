@@ -2,7 +2,7 @@
 # installs it to /etc/systemd/system/pi-display-microservice.service.
 
 [Unit]
-Description=pi-display-microservice (Athena's status board on a Display HAT Mini)
+Description=pi-display-microservice (Hermes' status board on a Display HAT Mini)
 After=local-fs.target network.target
 
 [Service]

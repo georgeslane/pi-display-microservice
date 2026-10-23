@@ -1,4 +1,4 @@
-"""Reading Athena's answers: what the board can use, and what it refuses."""
+"""Reading Hermes' answers: what the board can use, and what it refuses."""
 
 import pytest
 
@@ -24,7 +24,7 @@ def test_reads_a_status():
     assert status.online
 
 
-def test_ignores_what_it_does_not_know_so_athena_can_add_things():
+def test_ignores_what_it_does_not_know_so_hermes_can_add_things():
     payload = answer(state="working", mood="cheerful")
     payload["weather"] = {"London": "rain"}
     payload["assistant"]["avatar"] = "owl.png"
@@ -33,7 +33,7 @@ def test_ignores_what_it_does_not_know_so_athena_can_add_things():
 
 def test_missing_fields_take_their_defaults():
     status = parse({"api": 1, "status": {}}, NOW)
-    assert status == Status(Snapshot(State.IDLE), "Athena", "", "")
+    assert status == Status(Snapshot(State.IDLE), "Hermes", "", "")
 
 
 def test_problem_is_only_ever_set_here():
@@ -56,7 +56,7 @@ def test_refuses_what_it_cannot_follow(payload, says):
         parse(payload, NOW)
 
 
-def test_moves_athenas_times_onto_this_clock():
+def test_moves_hermes_times_onto_this_clock():
     status = parse(answer(state="approval", started=NOW - 60, deadline=NOW + 240, updated=NOW), NOW + 3.5)
     s = status.snapshot
     assert (s.started, s.deadline, s.updated) == (NOW - 56.5, NOW + 243.5, NOW + 3.5)

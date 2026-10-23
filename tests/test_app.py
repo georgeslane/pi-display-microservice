@@ -135,7 +135,7 @@ def test_a_turns_the_screen_off_and_any_button_turns_it_back_on():
 def test_x_likes_and_y_dislikes_the_photo_on_screen():
     photos = SpySlideshow()
     run([State.IDLE] * 7, presses=["X", "Y", "X", "B", "X", "Y"], slideshow=photos)
-    assert photos.rated == ["like", "dislike", "like"]  # and nothing once it's on Athena's status
+    assert photos.rated == ["like", "dislike", "like"]  # and nothing once it's on Hermes' status
 
 
 def test_an_approval_takes_over_from_the_photos_until_it_is_answered():
@@ -143,25 +143,25 @@ def test_an_approval_takes_over_from_the_photos_until_it_is_answered():
     photos = SpySlideshow()
     screen = run(states, presses=[None, None, "X", None, None], slideshow=photos)
     assert screen.calls("show") == [PHOTO, COLOURS[State.APPROVAL], PHOTO]
-    assert screen.calls("led") == [LED_OFF, BLUE, LED_OFF, BLUE, LED_OFF]  # it follows Athena, whatever's up
+    assert screen.calls("led") == [LED_OFF, BLUE, LED_OFF, BLUE, LED_OFF]  # it follows Hermes, whatever's up
     assert photos.rated == []  # X meant nothing while the approval was up
 
 
-def test_when_athena_turns_the_screen_on_it_shows_athenas_status():
+def test_when_hermes_turns_the_screen_on_it_shows_hermes_status():
     states = [State.IDLE, State.IDLE, State.WORKING, State.WORKING, State.IDLE]
     screen = run(states, presses=["A", None, None, None], slideshow=SpySlideshow())
     assert screen.calls("backlight") == [True, False, True, False]
     assert screen.calls("show") == [PHOTO, COLOURS[State.WORKING]]
 
 
-def test_b_on_a_screen_athena_turned_on_moves_on_to_the_photos_and_keeps_the_screen_on():
+def test_b_on_a_screen_hermes_turned_on_moves_on_to_the_photos_and_keeps_the_screen_on():
     states = [State.IDLE, State.IDLE, State.WORKING, State.WORKING, State.IDLE]
     screen = run(states, presses=["A", None, "B", None], slideshow=SpySlideshow())
     assert screen.calls("backlight") == [True, False, True]
     assert screen.calls("show") == [PHOTO, COLOURS[State.WORKING], PHOTO]
 
 
-def test_without_photos_there_is_only_athenas_status():
+def test_without_photos_there_is_only_hermes_status():
     screen = run([State.IDLE] * 4, presses=["B", "X", "Y"])
     assert screen.calls("show") == [COLOURS[State.IDLE]]
     assert screen.calls("backlight") == [True]
@@ -187,14 +187,14 @@ def test_buttons_still_work_after_the_clock_is_set_back():
     assert screen.calls("backlight") == [True, False, True]
 
 
-def test_boards_follow_athenas_name_unless_the_config_sets_one():
+def test_boards_follow_hermes_name_unless_the_config_sets_one():
     boards = Boards(Config())
-    athena = boards(Status(name="Athena", timezone="Europe/London"))
-    assert athena.title == "ATHENA" and boards(Status(name="Athena", timezone="Europe/London")) is athena
-    assert boards(Status(name="Pallas", timezone="Europe/London")).title == "PALLAS"  # Athena was renamed
+    hermes = boards(Status(name="Hermes", timezone="Europe/London"))
+    assert hermes.title == "HERMES" and boards(Status(name="Hermes", timezone="Europe/London")) is hermes
+    assert boards(Status(name="Pallas", timezone="Europe/London")).title == "PALLAS"  # Hermes was renamed
 
     fixed = Boards(Config(name="Owl", timezone="UTC"))
-    assert fixed(Status(name="Athena", timezone="Europe/London")).title == "OWL"
+    assert fixed(Status(name="Hermes", timezone="Europe/London")).title == "OWL"
     assert isinstance(fixed(Status()), Board)
 
 

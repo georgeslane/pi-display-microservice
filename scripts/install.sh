@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Set up pi-display-microservice, Athena's status board, on a Raspberry Pi with a Pimoroni
+# Set up pi-display-microservice, Hermes' status board, on a Raspberry Pi with a Pimoroni
 # Display HAT Mini. Run it from this repo, as your normal user, over SSH:
 #
 #   bash scripts/install.sh
@@ -53,7 +53,7 @@ bash scripts/disable-git-push.sh
 step "Creating config.toml"
 if [[ ! -f config.toml ]]; then
   cp config.example.toml config.toml
-  echo "Created config.toml. The defaults work with Athena's."
+  echo "Created config.toml. The defaults work with the board's plugin in Hermes."
 else
   echo "config.toml already exists; left it alone"
 fi
@@ -110,5 +110,5 @@ if ! systemctl is-active --quiet pi-display-microservice; then
   journalctl -u pi-display-microservice -n 15 --no-pager >&2 || true
   exit 1
 fi
-printf '\n\033[1;32mDone.\033[0m The board is running. It shows "offline" until it hears from Athena.\n'
+printf '\n\033[1;32mDone.\033[0m The board is running. It shows "offline" until it hears from Hermes.\n'
 echo "Check what it hears with: uv run pi-display-microservice check"
